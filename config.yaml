@@ -1,0 +1,62 @@
+# ============================================================================
+#  GT-Code configuration
+# ----------------------------------------------------------------------------
+#  This maps logical ROLES (brain, fast, tiny, reviewer, embed) to the actual
+#  models you have loaded. On the target PC, run GT once and type  /models
+#  to see the EXACT model ids your Ollama + LM Studio report, then paste them
+#  below. The ids marked "<-- CONFIRM" are best-guesses and will likely differ.
+# ============================================================================
+
+providers:
+  # LM Studio: start its local server (Developer tab -> Start Server).
+  lmstudio:
+    base_url: http://localhost:1234/v1
+  # Ollama: runs automatically once installed (ollama serve).
+  ollama:
+    base_url: http://localhost:11434/v1
+
+models:
+  # The heavy reasoning model — your 28B in LM Studio. Does the real coding work.
+  brain:
+    provider: lmstudio
+    model: "your-28b-model"        # <-- CONFIRM with /models (the 28B in LM Studio)
+
+  # Fast general-purpose fallback for medium tasks.
+  fast:
+    provider: ollama
+    model: "qwen3:8b"              # <-- CONFIRM with /models
+
+  # Tiny + instant. Used by the ROUTER to classify each request, and for trivia.
+  tiny:
+    provider: ollama
+    model: "llama3.2:3b"          # <-- CONFIRM with /models
+
+  # Reviews interactions and extracts reusable "lessons" (self-improving loop).
+  reviewer:
+    provider: lmstudio
+    model: "hermes"               # <-- CONFIRM with /models (your Hermes model)
+
+  # Embeddings for RAG / long-term memory.
+  embed:
+    provider: ollama
+    model: "nomic-embed-text"     # <-- CONFIRM with /models
+
+router:
+  enabled: true         # auto-pick a model per request; toggle at runtime with /route
+  default: brain        # fallback when the classifier is unsure
+
+agent:
+  max_steps: 12         # max tool-use iterations before GT must give a final answer
+  auto_approve: false   # if false, GT asks before running commands / writing files
+
+memory:
+  auto_learn: true      # after each task, Hermes extracts a lesson into memory
+  recall_k: 5           # how many memories/lessons to pull into context per turn
+  min_score: 0.28       # ignore memories below this similarity (0..1)
+
+web:
+  enabled: true         # allow the web_search / web_fetch tools (needs internet).
+                        # set false to keep GT fully air-gapped/offline.
+
+# Where the vector DB + logs live (relative to the GT-code folder).
+data_dir: data

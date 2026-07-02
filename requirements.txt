@@ -1,0 +1,8 @@
+# GT-Code dependencies — all pure-Python or ship prebuilt Windows wheels
+# (no compilers / C build tools needed on the target PC)
+requests>=2.31        # HTTP to Ollama + LM Studio
+PyYAML>=6.0           # config.yaml
+numpy>=1.26           # cosine similarity for the vector memory
+rich>=13.7            # nice terminal output (panels, markdown, colors)
+prompt_toolkit>=3.0   # cross-platform input line w/ history (works on Windows)
+beautifulsoup4>=4.12  # HTML parsing for web_search / web_fetch (stdlib parser, no C deps)
