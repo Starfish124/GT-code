@@ -157,14 +157,10 @@ class GTShell:
     # ---- command implementations -------------------------------------------
 
     def _startup_check(self):
-        """Ping both providers so config problems surface immediately."""
-        for name, prov in self.config.providers.items():
-            try:
-                ids = self.llm.list_models(prov["base_url"])
-                self.console.print(f"[green]✓[/green] {name}: {len(ids)} model(s) at {prov['base_url']}")
-            except LLMError:
-                self.console.print(f"[red]✗[/red] {name}: not reachable at {prov['base_url']} "
-                                   f"[dim](start it before using GT)[/dim]")
+        """Ping providers and best-effort match config model ids to whatever
+        is actually being served (falls back between providers), so GT works
+        out of the box on a fresh machine without editing config.yaml."""
+        self.config.auto_resolve(self.llm, self.console)
 
     def _show_models(self):
         for name, prov in self.config.providers.items():

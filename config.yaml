@@ -2,9 +2,11 @@
 #  GT-Code configuration
 # ----------------------------------------------------------------------------
 #  This maps logical ROLES (brain, fast, tiny, reviewer, embed) to the actual
-#  models you have loaded. On the target PC, run GT once and type  /models
-#  to see the EXACT model ids your Ollama + LM Studio report, then paste them
-#  below. The ids marked "<-- CONFIRM" are best-guesses and will likely differ.
+#  models you have loaded. You normally DON'T need to edit the ids: at launch
+#  GT matches them against what Ollama/LM Studio actually serve (fuzzy ids are
+#  corrected, placeholders like "your-28b-model" resolve to the biggest loaded
+#  model, and roles fall back to a live provider if one is down). Edit only to
+#  pin an exact id — check what's served with the  /models  command.
 # ============================================================================
 
 providers:

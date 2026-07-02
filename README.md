@@ -32,115 +32,70 @@ Your model line-up (edit freely in `config.yaml`):
 
 ---
 
-## Part 1 — What you need on the Windows PC
+## Quickstart — any new machine, three commands
 
-1. **Python 3.10+** — https://www.python.org/downloads/
-   During install, **check “Add python.exe to PATH.”**
-2. **Ollama** — https://ollama.com/download (runs a local server on `:11434`)
-3. **LM Studio** — https://lmstudio.ai (hosts your bigger models on `:1234`)
-4. This **`GT-code` folder**, copied anywhere on the PC (e.g. `C:\GT-code`).
+The only thing you need pre-installed is **Python 3.10+** on PATH
+(https://www.python.org/downloads/ — on Windows, check **“Add python.exe to
+PATH”** during install). Then:
+
+```bat
+git clone https://github.com/Starfish124/GT-code.git
+cd GT-code
+setup.bat          ::  macOS/Linux:  ./setup.sh
+```
+
+One script does everything (safe to re-run any time):
+
+1. creates the `.venv` and installs the Python dependencies,
+2. **installs Ollama** if it's missing (winget on Windows, brew/curl elsewhere),
+3. **downloads the local models** GT needs — `qwen3:8b` (coder),
+   `llama3.2:3b` (router), `nomic-embed-text` (memory) — ~8 GB the first
+   time, skipped if already present,
+4. installs a global **`gt` command**, so from then on it's just:
+
+```bat
+cd C:\any\project
+gt
+```
+
+GT operates on whatever folder you launch it from — like a real CLI tool.
+
+**No config editing needed.** On every launch GT checks what your Ollama and
+LM Studio are actually serving and matches `config.yaml`'s roles to reality:
+fuzzy ids get corrected automatically, and if LM Studio isn't running, the
+`brain`/`reviewer` roles fall back to Ollama so everything still works.
 
 ---
 
-## Part 2 — Pull the Ollama models
+## Optional — LM Studio for a bigger brain
 
-Open a terminal (PowerShell or CMD) and run:
+Out of the box GT runs everything on Ollama (`qwen3:8b` as the brain). For
+heavier reasoning, add LM Studio:
 
-```bat
-ollama pull qwen3:8b
-ollama pull llama3.2:3b
-ollama pull nomic-embed-text
-```
+1. Install **LM Studio** (https://lmstudio.ai) and download your 28B model
+   and Hermes (Search tab).
+2. **Developer** tab (the `>_` icon) → **Start Server** (listens on `:1234`),
+   and **load** the model(s) — LM Studio serves whichever models are loaded.
+3. Relaunch `gt` — it detects the server and promotes the biggest loaded
+   model to the `brain` role automatically.
 
-Verify they’re there:
-
-```bat
-ollama list
-```
-
-Ollama’s server starts automatically. You can confirm it’s up by opening
-http://localhost:11434 in a browser (it should say “Ollama is running”).
+> If GT prints “lmstudio: not reachable,” that server isn't started — GT
+> keeps working on Ollama in the meantime.
 
 ---
 
-## Part 3 — Load the LM Studio models & start its server
-
-1. Open **LM Studio**.
-2. Download / confirm your **28B model** and **Hermes** (Search tab).
-3. Go to the **Developer** tab (the `>_` icon) → **Start Server**.
-   It should say it’s listening on `http://localhost:1234`.
-4. **Load** the model(s) you want served (top model selector). LM Studio serves
-   whichever models are loaded; you can load more than one.
-
-> Tip: keep the server running whenever you use GT. If GT says “Can’t reach
-> lmstudio,” this server isn’t started.
-
----
-
-## Part 4 — Install GT
-
-Double-click **`setup.bat`** (or run it from a terminal in the folder).
-It creates a private virtual environment in `.venv\` and installs the six
-dependencies. One-time, ~1 minute.
-
-If Windows SmartScreen blocks the `.bat`, right-click → **Run anyway**, or run
-it from a terminal:
+## Use it
 
 ```bat
-cd C:\GT-code
-setup.bat
+gt
 ```
 
----
-
-## Part 5 — Point GT at your real model names (important!)
-
-Model ids differ between machines. Launch GT once and ask it what’s actually
-being served:
-
-```bat
-start.bat
-```
-
-At the `gt›` prompt, type:
-
-```
-/models
-```
-
-You’ll get two tables — the exact ids from Ollama and LM Studio. Open
-**`config.yaml`** and replace the values marked `<-- CONFIRM` with those exact
-strings. The most important one is `brain` (your 28B in LM Studio); the guessed
-name almost certainly won’t match.
-
-Example, if `/models` showed your LM Studio 28B as `glm-4-9b-chat` and Hermes as
-`hermes-3-llama-3.1-8b`:
-
-```yaml
-models:
-  brain:
-    provider: lmstudio
-    model: "glm-4-9b-chat"
-  reviewer:
-    provider: lmstudio
-    model: "hermes-3-llama-3.1-8b"
-```
-
-Save the file. (No restart tricks needed — just relaunch `start.bat` after edits.)
-
----
-
-## Part 6 — Use it
-
-```bat
-start.bat
-```
-
-On launch GT pings both providers so you know everything’s connected:
+On launch GT pings both providers and shows how each role resolved:
 
 ```
 ✓ ollama: 3 model(s) at http://localhost:11434/v1
 ✓ lmstudio: 2 model(s) at http://localhost:1234/v1
+brain: 'your-28b-model' not served — using 'glm-4-28b-chat'
 ```
 
 Now just talk to it. Some things to try:
@@ -271,8 +226,8 @@ shell access already ship built-in — see `gt/tools.py` for examples.)
 |--------|-----|
 | `Can't reach lmstudio` | Open LM Studio → Developer tab → **Start Server**, and load a model |
 | `Can't reach ollama` | Ensure Ollama is installed/running (open http://localhost:11434) |
-| `HTTP 404 ... model not found` | The id in `config.yaml` doesn’t match `/models`. Fix it. |
-| `model not found, try pulling it` | `ollama pull nomic-embed-text` (and the others) |
+| `HTTP 404 ... model not found` | Rare — auto-resolve fixes ids at launch. Check `/models` and `config.yaml`. |
+| `model not found, try pulling it` | Re-run `setup.bat` (or `ollama pull` the model it names) |
 | `'python' is not recognized` | Reinstall Python with **Add to PATH**, or use `py -3` |
 | First reply from the 28B is slow | Normal — LM Studio loads it into RAM/VRAM on first call |
 | Router feels laggy | `/route` off, or `/model brain` to pin the big model |
@@ -300,8 +255,8 @@ checks should pass.
 GT-code/
   config.yaml          your models + settings  (edit this)
   requirements.txt     dependencies
-  setup.bat / .sh      one-time install
-  start.bat / .sh      launch GT
+  setup.bat / .sh      one-shot installer (deps + Ollama + models + `gt` cmd)
+  start.bat / .sh      launch GT without the global `gt` command
   gt/
     cli.py             the terminal + slash commands
     router.py          picks a model per request
