@@ -2,7 +2,7 @@
 # GT-Code one-shot setup for macOS / Linux. Safe to re-run any time.
 #   1. venv + Python dependencies
 #   2. Ollama (auto-installed if missing)
-#   3. the local models GT needs (~8 GB the first time)
+#   3. the baseline local models (GT's first launch offers the bigger ones)
 #   4. a global "gt" command so you can run GT from any folder
 # LM Studio is OPTIONAL — GT falls back to Ollama without it.
 set -e
@@ -37,11 +37,13 @@ if ! ollama list >/dev/null 2>&1; then
   sleep 4
 fi
 
-# --- pull the models GT needs (skips anything already downloaded) ---
+# --- pull the baseline models (skips anything already downloaded) ---
+# GT's first launch evaluates this machine's hardware and offers the bigger
+# models (up to 14B) only if the machine can actually run them.
 echo
-echo "Downloading local models — the slow part, ~8 GB on a fresh machine:"
-echo "  qwen3:8b (coder) + llama3.2:3b (router) + nomic-embed-text (memory)"
-for m in qwen3:8b llama3.2:3b nomic-embed-text; do
+echo "Downloading the baseline models (~2.3 GB on a fresh machine):"
+echo "  llama3.2:3b (minimum) + nomic-embed-text (memory)"
+for m in llama3.2:3b nomic-embed-text; do
   ollama pull "$m" || echo "[WARN] could not pull $m — run 'ollama pull $m' later."
 done
 
@@ -67,8 +69,8 @@ if curl -fsm 3 http://localhost:1234/v1/models >/dev/null 2>&1; then
   echo "[i] LM Studio detected on :1234 — GT will use it for the 'brain' role."
 else
   echo "[i] LM Studio not detected — that's fine: GT runs everything on Ollama."
-  echo "    For a bigger 'brain', install LM Studio, load a big model, and"
-  echo "    start its server (Developer tab). GT picks it up on next launch."
+  echo "    GT's first launch evaluates this machine and downloads the best"
+  echo "    models for it (3B minimum, 14B maximum — bigger is too slow)."
 fi
 
 echo

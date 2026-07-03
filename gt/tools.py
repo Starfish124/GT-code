@@ -6,38 +6,14 @@ go through ctx.approve() so the user stays in control unless auto-approve is on.
 """
 
 import subprocess
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+
+from .base import Ctx, Tool  # noqa: F401  (re-exported; agent.py imports Ctx from here)
+from .office import OFFICE_TOOLS
 
 # A browser-ish UA so search engines / sites don't reject the request.
 _USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                "(KHTML, like Gecko) Chrome/122.0 Safari/537.36")
-
-
-@dataclass
-class Ctx:
-    """Shared state handed to every tool call."""
-    cwd: Path
-    memory: object
-    approve: Callable[[str, str], bool]   # (title, detail) -> bool
-    config: object
-
-    def resolve(self, path: str) -> Path:
-        p = Path(str(path)).expanduser()
-        if not p.is_absolute():
-            p = self.cwd / p
-        return p
-
-
-class Tool:
-    name = ""
-    description = ""
-    args: dict = {}          # arg_name -> human description
-    changes_system = False   # if True, requires approval
-
-    def run(self, args: dict, ctx: Ctx) -> str:
-        raise NotImplementedError
 
 
 # --------------------------------------------------------------------------- #
@@ -74,7 +50,7 @@ class WriteFile(Tool):
         p = ctx.resolve(args["path"])
         content = args.get("content", "")
         preview = content if len(content) < 800 else content[:800] + "\n... [more]"
-        if not ctx.approve(f"Write {p}", preview):
+        if not ctx.approve(f"Write {p}", preview, key="files"):
             return "DENIED: user declined the write."
         try:
             p.parent.mkdir(parents=True, exist_ok=True)
@@ -112,7 +88,7 @@ class EditFile(Tool):
             return (f"ERROR: `find` matched {count} times; it must be unique. "
                     "Include more surrounding context.")
         detail = f"- {find}\n+ {replace}"
-        if not ctx.approve(f"Edit {p}", detail):
+        if not ctx.approve(f"Edit {p}", detail, key="files"):
             return "DENIED: user declined the edit."
         try:
             p.write_text(text.replace(find, replace), encoding="utf-8")
@@ -195,7 +171,8 @@ class RunCommand(Tool):
         command = args.get("command", "").strip()
         if not command:
             return "ERROR: empty command."
-        if not ctx.approve("Run command", command):
+        from .permissions import command_key
+        if not ctx.approve("Run command", command, key=command_key(command)):
             return "DENIED: user declined to run the command."
         try:
             proc = subprocess.run(
@@ -218,6 +195,30 @@ class RunCommand(Tool):
         if err:
             parts.append(f"stderr:\n{err}")
         return "\n".join(parts)
+
+
+# --------------------------------------------------------------------------- #
+#  Interaction tool — lets GT clarify requirements like Claude Code does
+# --------------------------------------------------------------------------- #
+
+class AskUser(Tool):
+    name = "ask_user"
+    description = ("Ask the user ONE short question and get their typed answer. "
+                   "Use it to clarify ambiguous requirements before starting, "
+                   "to present a plan and confirm it, or to choose between "
+                   "options. Don't use it for permission to run tools — those "
+                   "handle approval themselves.")
+    args = {"question": "The question to ask (keep it short and concrete)."}
+
+    def run(self, args, ctx):
+        question = str(args.get("question", "")).strip()
+        if not question:
+            return "ERROR: empty question."
+        if not ctx.ask:
+            return "ERROR: interactive input is not available right now."
+        answer = ctx.ask(question)
+        return f"The user answered: {answer}" if answer.strip() \
+            else "The user gave no answer — use your best judgment and continue."
 
 
 # --------------------------------------------------------------------------- #
@@ -348,9 +349,9 @@ class WebFetch(Tool):
 
 ALL_TOOLS = [
     ReadFile(), WriteFile(), EditFile(), ListDir(),
-    SearchFiles(), RunCommand(), Recall(),
+    SearchFiles(), RunCommand(), Recall(), AskUser(),
     WebSearch(), WebFetch(),
-]
+] + OFFICE_TOOLS
 REGISTRY = {t.name: t for t in ALL_TOOLS}
 
 # Tools that reach the internet — filtered out when web.enabled is false.

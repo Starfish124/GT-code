@@ -19,6 +19,8 @@ from .memory import Memory, chunk_text
 from .router import Router
 from .improve import Improver
 from .agent import Agent
+from .permissions import Permissions
+from . import wizard, machine
 
 BANNER = r"""
   ___ _____    ___         _
@@ -30,10 +32,13 @@ BANNER = r"""
 HELP = """\
 [bold]Commands[/bold]
   /help              show this help
+  /setup             re-run first-launch setup (evaluate machine, download models)
+  /doctor            show this machine's hardware + which models are live
   /models            list model ids your Ollama + LM Studio actually serve
   /model <role|off>  pin a model role (brain/fast/tiny) or 'off' to auto-route
   /route             toggle smart auto-routing on/off
   /auto              toggle auto-approve (skip y/n prompts for writes & commands)
+  /permissions       show granted permissions; '/permissions clear' revokes all
   /cd <path>         change the workspace directory GT operates in
   /index <path>      embed a file or folder into memory for RAG
   /remember <text>   save a note to long-term memory
@@ -43,8 +48,8 @@ HELP = """\
   /reset             clear the current conversation history
   /quit  /exit       leave
 
-Anything else is a request for GT. It will route to a model, use tools
-(reading/writing files, running commands), and remember what it learns.
+Anything else is a request for GT. It will clarify, plan, then use tools
+(files, commands, web, Excel/PowerPoint/Word) — asking permission as it goes.
 """
 
 
@@ -56,37 +61,40 @@ class GTShell:
         self.memory = Memory(self.llm, self.config.data_dir / "memory.db")
         self.router = Router(self.llm, self.config, self.console)
         self.improver = Improver(self.llm, self.memory)
-        self.auto_approve = bool(self.config.agent.get("auto_approve", False))
-
-        self.agent = Agent(
-            llm=self.llm, config=self.config, memory=self.memory,
-            router=self.router, console=self.console,
-            improver=self.improver, approve=self._approve,
-        )
 
         hist = self.config.data_dir / "history.txt"
         hist.parent.mkdir(parents=True, exist_ok=True)
         self.session = PromptSession(history=FileHistory(str(hist)))
 
-    # ---- approval callback handed to the agent/tools ------------------------
+        self.perms = Permissions(
+            console=self.console, prompt_fn=self.session.prompt,
+            store=self.config.data_dir / "permissions.json",
+            auto_approve=bool(self.config.agent.get("auto_approve", False)),
+        )
 
-    def _approve(self, title, detail=""):
-        if self.auto_approve:
-            self.console.print(f"[dim]auto-approved: {title}[/dim]")
-            return True
-        self.console.print(Panel(Text(detail or "(no details)"),
-                                 title=f"Approve? {title}",
-                                 border_style="yellow", expand=False))
+        self.agent = Agent(
+            llm=self.llm, config=self.config, memory=self.memory,
+            router=self.router, console=self.console,
+            improver=self.improver, approve=self.perms.approve,
+            ask=self._ask_user,
+        )
+
+    # ---- interaction callbacks handed to the agent/tools ---------------------
+
+    def _ask_user(self, question):
+        """Backs the ask_user tool — GT asks, the user types an answer."""
+        self.console.print(Panel(Text(question), title="GT asks",
+                                 border_style="cyan", expand=False))
         try:
-            ans = self.session.prompt("  allow? [y/N] ").strip().lower()
+            return self.session.prompt("  your answer › ").strip()
         except (EOFError, KeyboardInterrupt):
-            return False
-        return ans in ("y", "yes")
+            return ""
 
     # ---- main loop ----------------------------------------------------------
 
     def run(self):
         self.console.print(f"[bold cyan]{BANNER}[/bold cyan]")
+        wizard.ensure(self.config, self.llm, self.console, self.session.prompt)
         self._startup_check()
         self.console.print("Type [bold]/help[/bold] for commands, "
                            "[bold]/quit[/bold] to exit.\n")
@@ -131,10 +139,19 @@ class GTShell:
             self.router.enabled = not self.router.enabled
             self.console.print(f"auto-routing: [bold]{'on' if self.router.enabled else 'off'}[/bold]")
         elif cmd == "/auto":
-            self.auto_approve = not self.auto_approve
-            self.console.print(f"auto-approve: [bold]{'on' if self.auto_approve else 'off'}[/bold]"
-                               + ("  [yellow](GT will write files & run commands without asking)[/yellow]"
-                                  if self.auto_approve else ""))
+            self.perms.auto_approve = not self.perms.auto_approve
+            self.console.print(f"auto-approve: [bold]{'on' if self.perms.auto_approve else 'off'}[/bold]"
+                               + ("  [yellow](GT will write files & run commands without asking — "
+                                  "dangerous commands still prompt)[/yellow]"
+                                  if self.perms.auto_approve else ""))
+        elif cmd == "/permissions":
+            self._permissions(arg)
+        elif cmd == "/setup":
+            wizard.ensure(self.config, self.llm, self.console,
+                          self.session.prompt, force=True)
+            self._startup_check()
+        elif cmd == "/doctor":
+            self._doctor()
         elif cmd == "/cd":
             self._change_dir(arg)
         elif cmd == "/index":
@@ -161,6 +178,41 @@ class GTShell:
         is actually being served (falls back between providers), so GT works
         out of the box on a fresh machine without editing config.yaml."""
         self.config.auto_resolve(self.llm, self.console)
+
+    def _permissions(self, arg):
+        if arg.strip().lower() == "clear":
+            self.perms.clear()
+            self.console.print("all granted permissions revoked — GT will ask again.")
+            return
+        grants = self.perms.list_grants()
+        if not grants:
+            self.console.print("[dim]no standing permissions — GT asks before "
+                               "every write/command. Answer 'a' at a prompt to "
+                               "grant one.[/dim]")
+            return
+        self.console.print("[bold]Always-allowed[/bold] "
+                           "([dim]/permissions clear to revoke[/dim])")
+        for g in grants:
+            self.console.print(f"  • {g}")
+
+    def _doctor(self):
+        hw = machine.probe()
+        rec = machine.recommend(hw)
+        self.console.print(
+            f"[bold]Machine[/bold]  {hw['os']} ({hw['arch']})  ·  {hw['cpu']}  "
+            f"·  {hw['cores']} cores  ·  {hw['ram_gb']} GB RAM"
+            + (f"  ·  GPU: {hw['gpu']}" if hw['gpu'] else "")
+            + (f" ({hw['vram_gb']} GB VRAM)" if hw['vram_gb'] else ""))
+        self.console.print(f"[bold]Verdict[/bold]  {rec['reason']}")
+        self.console.print("[bold]Line-up[/bold]")
+        for role in ("brain", "fast", "tiny", "reviewer", "embed"):
+            try:
+                spec = self.config.model_for(role)
+                self.console.print(f"  {role:<9} {spec['model']}  "
+                                   f"[dim]({spec['provider']})[/dim]")
+            except KeyError:
+                self.console.print(f"  {role:<9} [red]unconfigured[/red]")
+        self._startup_check()
 
     def _show_models(self):
         for name, prov in self.config.providers.items():

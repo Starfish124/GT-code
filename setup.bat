@@ -3,7 +3,7 @@ REM ============================================================
 REM  GT-Code one-shot setup for Windows. Safe to re-run any time.
 REM    1. venv + Python dependencies
 REM    2. Ollama (auto-installed via winget if missing)
-REM    3. the local models GT needs (~8 GB the first time)
+REM    3. the baseline local models (GT's first launch offers the bigger ones)
 REM    4. a global "gt" command so you can run GT from any folder
 REM  LM Studio is OPTIONAL - GT falls back to Ollama without it.
 REM ============================================================
@@ -69,12 +69,14 @@ if errorlevel 1 (
   )
 )
 
-REM --- pull the models GT needs (skips anything already downloaded) ---
+REM --- pull the baseline models (skips anything already downloaded) ---
+REM GT's first launch evaluates this PC's hardware and offers the bigger
+REM models (up to 14B) only if the machine can actually run them.
 echo.
-echo Downloading local models - the slow part, ~8 GB on a fresh machine:
-echo   qwen3:8b (coder) + llama3.2:3b (router) + nomic-embed-text (memory)
+echo Downloading the baseline models (~2.3 GB on a fresh machine):
+echo   llama3.2:3b (minimum) + nomic-embed-text (memory)
 echo.
-for %%M in (qwen3:8b llama3.2:3b nomic-embed-text) do (
+for %%M in (llama3.2:3b nomic-embed-text) do (
   ollama pull %%M
   if errorlevel 1 echo [WARN] could not pull %%M - run "ollama pull %%M" later.
 )
@@ -97,8 +99,8 @@ echo.
 ".venv\Scripts\python.exe" -c "import requests;requests.get('http://localhost:1234/v1/models',timeout=3)" >nul 2>nul
 if errorlevel 1 (
   echo [i] LM Studio not detected - that's fine: GT runs everything on Ollama.
-  echo     For a bigger "brain", install LM Studio, load your 28B model, and
-  echo     start its server ^(Developer tab^). GT picks it up on next launch.
+  echo     GT's first launch evaluates this PC and downloads the best models
+  echo     for it ^(3B minimum, 14B maximum - bigger is too slow to be useful^).
 ) else (
   echo [i] LM Studio detected on :1234 - GT will use it for the "brain" role.
 )

@@ -58,9 +58,12 @@ check("long text splits into overlapping chunks", len(chunks) == 3)
 check("empty text -> no chunks", chunk_text("") == [])
 
 print("\ntool registry + docs")
-check("all 9 tools registered", len(REGISTRY) == 9)
+check("all 13 tools registered", len(REGISTRY) == 13)
 check("tool_docs mentions run_command", "run_command" in tool_docs())
 check("tool_docs mentions web_search", "web_search" in tool_docs())
+check("office tools registered",
+      {"create_excel", "create_powerpoint", "create_word"} <= set(REGISTRY))
+check("ask_user registered", "ask_user" in REGISTRY)
 
 print("\nweb tools can be gated by config")
 check("web enabled -> web_search present",
@@ -91,7 +94,7 @@ check("renderer ran without error", buf.text.startswith("# Hi"))
 print("\nfile tools actually work (write -> read -> list)")
 tmp = Path(__file__).resolve().parent / "_tmp"
 tmp.mkdir(exist_ok=True)
-ctx = Ctx(cwd=tmp, memory=None, approve=lambda *_: True, config=cfg)
+ctx = Ctx(cwd=tmp, memory=None, approve=lambda *_, **__: True, config=cfg)
 WriteFile().run({"path": "hello.txt", "content": "hi there"}, ctx)
 check("read_file returns what write_file wrote",
       ReadFile().run({"path": "hello.txt"}, ctx) == "hi there")
@@ -99,10 +102,58 @@ check("list_dir sees the new file", "hello.txt" in ListDir().run({"path": "."}, 
 check("approval denial blocks a write",
       "DENIED" in WriteFile().run(
           {"path": "no.txt", "content": "x"},
-          Ctx(cwd=tmp, memory=None, approve=lambda *_: False, config=cfg)))
+          Ctx(cwd=tmp, memory=None, approve=lambda *_, **__: False, config=cfg)))
+
+print("\nask_user tool")
+from gt.tools import AskUser
+ask_ctx = Ctx(cwd=tmp, memory=None, approve=lambda *_, **__: True, config=cfg,
+              ask=lambda q: "use React")
+check("ask_user relays the user's answer",
+      "use React" in AskUser().run({"question": "Which frontend?"}, ask_ctx))
+check("ask_user handles no-input mode",
+      "ERROR" in AskUser().run({"question": "x"},
+                               Ctx(cwd=tmp, memory=None,
+                                   approve=lambda *_, **__: True, config=cfg)))
 # cleanup
 (tmp / "hello.txt").unlink(missing_ok=True)
 tmp.rmdir()
+
+print("\nhardware evaluation + model tiers")
+from gt import machine
+hw = machine.probe()
+check("probe reports RAM", hw["ram_gb"] > 0)
+check("probe reports CPU cores", hw["cores"] > 0)
+check("32GB machine -> full tier (14B brain)",
+      machine.recommend({"ram_gb": 32, "vram_gb": None})["lineup"]["brain"] == "qwen3:14b")
+check("12GB machine -> standard tier (8B brain)",
+      machine.recommend({"ram_gb": 12, "vram_gb": None})["lineup"]["brain"] == "qwen3:8b")
+check("8GB machine -> minimum tier (3B brain)",
+      machine.recommend({"ram_gb": 8, "vram_gb": None})["lineup"]["brain"] == "llama3.2:3b")
+check("big GPU beats small RAM",
+      machine.recommend({"ram_gb": 8, "vram_gb": 12})["tier"] == "full")
+check("nothing ever recommends >14B",
+      all("27b" not in m and "28b" not in m
+          for t in machine.TIERS.values() for m in t["lineup"].values()))
+
+print("\npermissions")
+from gt.permissions import Permissions, command_key, _DANGEROUS
+store = Path(__file__).resolve().parent / "_perms.json"
+store.unlink(missing_ok=True)
+_answers = iter(["a"])
+perms = Permissions(Console(force_terminal=False),
+                    lambda _: next(_answers), store)
+check("'a' grants and allows", perms.approve("Run command", "git status",
+                                             key="cmd:git"))
+check("grant persists to disk",
+      "cmd:git" in Permissions(Console(force_terminal=False),
+                               lambda _: "n", store).grants)
+check("granted key skips the prompt",
+      perms.approve("Run command", "git log", key="cmd:git"))
+check("dangerous command detected", bool(_DANGEROUS.search("rm -rf /")))
+check("plain rm is not dangerous", not _DANGEROUS.search("rm file.txt"))
+check("command_key normalises paths",
+      command_key("C:\\Python\\python.exe -m pip install x") == "cmd:python")
+store.unlink(missing_ok=True)
 
 print("\nrouter heuristics (no LLM call)")
 r = Router(llm=None, config=cfg)

@@ -45,7 +45,8 @@ def extract_tool_call(text):
 
 
 class Agent:
-    def __init__(self, llm, config, memory, router, console, improver, approve):
+    def __init__(self, llm, config, memory, router, console, improver,
+                 approve, ask=None):
         self.llm = llm
         self.config = config
         self.memory = memory
@@ -53,6 +54,7 @@ class Agent:
         self.console = console
         self.improver = improver
         self.approve = approve
+        self.ask = ask
 
         self.cwd = Path.cwd()
         self.history = []          # [{role, content}] — user msgs + final answers
@@ -84,7 +86,7 @@ class Agent:
         ]
 
         ctx = Ctx(cwd=self.cwd, memory=self.memory,
-                  approve=self.approve, config=self.config)
+                  approve=self.approve, config=self.config, ask=self.ask)
 
         final_answer = None
         for step in range(1, self.max_steps + 1):

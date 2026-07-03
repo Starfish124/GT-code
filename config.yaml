@@ -1,58 +1,59 @@
 # ============================================================================
 #  GT-Code configuration
 # ----------------------------------------------------------------------------
-#  This maps logical ROLES (brain, fast, tiny, reviewer, embed) to the actual
-#  models you have loaded. You normally DON'T need to edit the ids: at launch
-#  GT matches them against what Ollama/LM Studio actually serve (fuzzy ids are
-#  corrected, placeholders like "your-28b-model" resolve to the biggest loaded
-#  model, and roles fall back to a live provider if one is down). Edit only to
-#  pin an exact id — check what's served with the  /models  command.
+#  Roles (brain, fast, tiny, reviewer, embed) map to local models. You rarely
+#  need to edit this: the FIRST-LAUNCH WIZARD evaluates the machine's hardware
+#  and picks the biggest tier that runs well (3B minimum, 14B maximum — 27B+
+#  is deliberately unsupported: too slow for interactive coding). Its choice
+#  is saved to data/setup.json and applied on every launch; re-evaluate with
+#  /setup, inspect with /doctor, and check served ids with /models.
 # ============================================================================
 
 providers:
-  # LM Studio: start its local server (Developer tab -> Start Server).
-  lmstudio:
-    base_url: http://localhost:1234/v1
-  # Ollama: runs automatically once installed (ollama serve).
+  # Ollama is the primary (and only required) provider.
   ollama:
     base_url: http://localhost:11434/v1
+  # LM Studio is OPTIONAL — if its server is running, GT can fall back to it.
+  lmstudio:
+    base_url: http://localhost:1234/v1
 
+# Defaults for a mid-range machine; the wizard overrides these per machine.
 models:
-  # The heavy reasoning model — your 28B in LM Studio. Does the real coding work.
+  # The heavy reasoning model — planning + hard coding. 14B max by design.
   brain:
-    provider: lmstudio
-    model: "your-28b-model"        # <-- CONFIRM with /models (the 28B in LM Studio)
+    provider: ollama
+    model: "qwen3:14b"
 
-  # Fast general-purpose fallback for medium tasks.
+  # Fast general-purpose model for everyday coding.
   fast:
     provider: ollama
-    model: "qwen3:8b"              # <-- CONFIRM with /models
+    model: "qwen3:8b"
 
   # Tiny + instant. Used by the ROUTER to classify each request, and for trivia.
   tiny:
     provider: ollama
-    model: "llama3.2:3b"          # <-- CONFIRM with /models
+    model: "llama3.2:3b"
 
   # Reviews interactions and extracts reusable "lessons" (self-improving loop).
   reviewer:
-    provider: lmstudio
-    model: "hermes"               # <-- CONFIRM with /models (your Hermes model)
+    provider: ollama
+    model: "qwen3:8b"
 
   # Embeddings for RAG / long-term memory.
   embed:
     provider: ollama
-    model: "nomic-embed-text"     # <-- CONFIRM with /models
+    model: "nomic-embed-text"
 
 router:
   enabled: true         # auto-pick a model per request; toggle at runtime with /route
   default: brain        # fallback when the classifier is unsure
 
 agent:
-  max_steps: 12         # max tool-use iterations before GT must give a final answer
+  max_steps: 20         # max tool-use iterations before GT must give a final answer
   auto_approve: false   # if false, GT asks before running commands / writing files
 
 memory:
-  auto_learn: true      # after each task, Hermes extracts a lesson into memory
+  auto_learn: true      # after each task, the reviewer extracts a lesson into memory
   recall_k: 5           # how many memories/lessons to pull into context per turn
   min_score: 0.28       # ignore memories below this similarity (0..1)
 

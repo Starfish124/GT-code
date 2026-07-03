@@ -4,31 +4,38 @@ A small, self-hosted CLI coding assistant — like Claude Code, but running
 **entirely on your machine** against your local models. No cloud, no API keys,
 no data leaving your PC.
 
-It routes each request to the right local model, runs an **agentic tool loop**
-(read/write/edit files, run commands, search, **web search**), keeps a
-**vector memory** of notes and indexed docs, and **improves itself** by
-distilling reusable lessons from past work. Answers **stream in as live
-markdown** — formatted code, lists, and headings appear as they're generated.
+On **first launch it evaluates your hardware** (RAM, CPU, GPU/VRAM), tells you
+what this machine can handle, and offers to download the right models — 3B
+minimum, 14B maximum (27B+ is deliberately unsupported: too slow to be a
+useful interactive agent on consumer hardware). It then works like Claude
+Code: **asks clarifying questions**, **presents an architecture plan** before
+building, executes with tools (files, shell, web, **Excel / PowerPoint /
+Word**), verifies its work, and **asks permission** as it goes — with
+"always allow" grants per action kind, just like Claude Code.
 
 ```
-You type  ─►  Router (llama3.2:3b picks a model)  ─►  Brain (28B / Qwen 8B)
-                                                          │
-                        ┌─────────────────────────────────┼──────────────────────┐
-                   Agent tool-loop                    RAG memory              Self-improve
-              read / write / edit files,        nomic-embed + sqlite       Hermes distills a
-              run commands, search files,       cosine vector search       reusable "lesson"
-              web search + fetch, recall
+You type ─► Router (3B picks a model) ─► Brain (qwen3:14b / 8B — never 27B+)
+                                              │
+              clarify (ask_user) ─► plan ─► execute ─► verify
+                                              │
+            ┌─────────────────────────────────┼──────────────────────┐
+       Agent tool-loop                    RAG memory              Self-improve
+   read / write / edit files,        nomic-embed + sqlite      reviewer distills
+   run commands, web search,         cosine vector search      a reusable lesson
+   Excel / PowerPoint / Word
 ```
 
-Your model line-up (edit freely in `config.yaml`):
+The model line-up is picked **per machine** by the first-launch wizard:
 
-| Role       | Default model            | Runs on    | Job |
-|------------|--------------------------|------------|-----|
-| `brain`    | your 28B                 | LM Studio  | Heavy reasoning & coding |
-| `fast`     | `qwen3:8b`               | Ollama     | Medium tasks, quick help |
-| `tiny`     | `llama3.2:3b`            | Ollama     | Router + trivia (instant) |
-| `reviewer` | `hermes`                 | LM Studio  | Extracts lessons (self-improve) |
-| `embed`    | `nomic-embed-text`       | Ollama     | Embeddings for memory/RAG |
+| Tier | Needs | brain | fast | tiny |
+|------|-------|-------|------|------|
+| **Full** | ≥16 GB RAM (or ≥11 GB VRAM) | `qwen3:14b` | `qwen3:8b` | `llama3.2:3b` |
+| **Standard** | ≥10 GB RAM | `qwen3:8b` | `qwen3:8b` | `llama3.2:3b` |
+| **Minimum** | anything less | `llama3.2:3b` | `llama3.2:3b` | `llama3.2:3b` |
+
+(`nomic-embed-text` is always installed for memory/RAG; the 3B + embed models
+are the minimum for GT to function.) Re-evaluate any time with `/setup`,
+inspect with `/doctor`.
 
 ---
 
@@ -44,74 +51,54 @@ cd GT-code
 setup.bat          ::  macOS/Linux:  ./setup.sh
 ```
 
-One script does everything (safe to re-run any time):
-
-1. creates the `.venv` and installs the Python dependencies,
-2. **installs Ollama** if it's missing (winget on Windows, brew/curl elsewhere),
-3. **downloads the local models** GT needs — `qwen3:8b` (coder),
-   `llama3.2:3b` (router), `nomic-embed-text` (memory) — ~8 GB the first
-   time, skipped if already present,
-4. installs a global **`gt` command**, so from then on it's just:
+The script creates the `.venv`, installs dependencies, **installs Ollama** if
+missing (winget on Windows, brew/curl elsewhere), pulls the tiny baseline
+models (~2.3 GB), and installs a global **`gt` command**. Then:
 
 ```bat
 cd C:\any\project
 gt
 ```
 
-GT operates on whatever folder you launch it from — like a real CLI tool.
+**First launch runs the setup wizard**: it probes your hardware, shows a
+verdict ("16 GB RAM comfortably fits a 14B model…"), and asks before
+downloading each recommended model. Nothing is pulled without your consent.
+Subsequent launches skip straight to work.
 
-**No config editing needed.** On every launch GT checks what your Ollama and
-LM Studio are actually serving and matches `config.yaml`'s roles to reality:
-fuzzy ids get corrected automatically, and if LM Studio isn't running, the
-`brain`/`reviewer` roles fall back to Ollama so everything still works.
-
----
-
-## Optional — LM Studio for a bigger brain
-
-Out of the box GT runs everything on Ollama (`qwen3:8b` as the brain). For
-heavier reasoning, add LM Studio:
-
-1. Install **LM Studio** (https://lmstudio.ai) and download your 28B model
-   and Hermes (Search tab).
-2. **Developer** tab (the `>_` icon) → **Start Server** (listens on `:1234`),
-   and **load** the model(s) — LM Studio serves whichever models are loaded.
-3. Relaunch `gt` — it detects the server and promotes the biggest loaded
-   model to the `brain` role automatically.
-
-> If GT prints “lmstudio: not reachable,” that server isn't started — GT
-> keeps working on Ollama in the meantime.
+**No config editing needed.** GT saves the wizard's choice and re-verifies at
+every launch what Ollama actually serves, falling back gracefully.
 
 ---
 
 ## Use it
 
-```bat
-gt
+```
+gt› build me a todo app with a REST API
 ```
 
-On launch GT pings both providers and shows how each role resolved:
+For a task like that, GT behaves like Claude Code:
+
+1. **asks** 1–3 short questions (which stack? database? auth?) — answer inline,
+2. **presents its plan** — components, files, steps — and confirms it,
+3. **executes** step by step, asking permission per action kind:
+   ```
+   ╭─ Permission needed — Run command ─╮
+   │ npm install express               │
+   ╰───────────────────────────────────╯
+     [y] yes once   [a] always allow 'cmd:npm'   [n] no
+   ```
+4. **verifies** — runs the code/tests and fixes failures before reporting done.
+
+It can also produce real documents:
 
 ```
-✓ ollama: 3 model(s) at http://localhost:11434/v1
-✓ lmstudio: 2 model(s) at http://localhost:1234/v1
-brain: 'your-28b-model' not served — using 'glm-4-28b-chat'
+gt› make an excel file comparing our three pricing tiers
+gt› turn README.md into a 5-slide powerpoint
+gt› write a word doc summarising this codebase
 ```
 
-Now just talk to it. Some things to try:
-
-```
-gt› what files are in this folder?
-gt› create a python script hello.py that prints the fibonacci sequence to 100
-gt› run hello.py
-gt› read hello.py and add a docstring
-gt› /remember I prefer type hints and f-strings in Python
-gt› /index C:\my-project\src        (index a codebase for Q&A)
-gt› how does the auth flow work in the code I just indexed?
-```
-
-GT will show which model it routed to, each tool it calls (with a preview), and
-ask permission before writing files or running commands (unless you `/auto`).
+Destructive-looking commands (`rm -rf`, `format`, `del /s`, forced pushes…)
+**always** prompt in red — even with `/auto` on or a standing grant.
 
 ---
 
@@ -120,10 +107,13 @@ ask permission before writing files or running commands (unless you `/auto`).
 | Command | What it does |
 |--------|--------------|
 | `/help` | List commands |
+| `/setup` | Re-run the wizard (re-evaluate hardware, download models) |
+| `/doctor` | Hardware report + model line-up + provider health |
 | `/models` | Show the exact model ids Ollama + LM Studio serve |
 | `/model <role\|off>` | Pin a model (`brain`/`fast`/`tiny`) or `off` to auto-route |
 | `/route` | Toggle smart auto-routing |
-| `/auto` | Toggle auto-approve (skip the y/N prompts) |
+| `/auto` | Toggle auto-approve (dangerous commands still prompt) |
+| `/permissions` | List standing grants; `/permissions clear` revokes all |
 | `/cd <path>` | Change the working directory GT operates in |
 | `/index <path>` | Embed a file/folder into memory for RAG |
 | `/remember <text>` | Save a note to long-term memory |
@@ -137,38 +127,48 @@ ask permission before writing files or running commands (unless you `/auto`).
 
 ## How it works (the interesting part)
 
-**Routing** (`gt/router.py`). Cheap heuristics run first (small talk → `tiny`,
-anything with code/file signals or long prompts → `brain`). Only genuinely
-ambiguous requests cost a one-word classification from the 3B model. Pin a model
-anytime with `/model brain`.
+**Hardware evaluation** (`gt/machine.py`). Pure stdlib probing — RAM via
+`GlobalMemoryStatusEx` / `sysctl` / `/proc/meminfo`, GPU via `nvidia-smi`,
+Apple Silicon unified memory detected. `recommend()` maps the numbers to the
+biggest tier that runs *comfortably*, and never suggests anything above 14B.
 
-**Agent loop** (`gt/agent.py`). GT uses a **prompt-based tool protocol**, not
-native function-calling, so it behaves identically across GLM, Hermes, Qwen, and
-Llama regardless of backend quirks. The model emits a single JSON block to call
-a tool; GT runs it, feeds back the result, and loops until the model returns a
-plain-text answer or hits `max_steps`. Output **streams as live markdown**
-(`gt/ui.py`) — no raw-then-reformat flicker.
+**First-launch wizard** (`gt/wizard.py`). Shows the hardware verdict and a
+role→model plan with download sizes, checks what Ollama already serves, and
+`ollama pull`s only what you approve. The choice is saved to
+`data/setup.json` and applied on every launch.
 
-**Web access** (`gt/tools.py`). `web_search` (keyless, via DuckDuckGo) returns
-titles/urls/snippets, and `web_fetch` downloads a page and strips it to readable
-text. Both need internet and fail gracefully offline. To keep GT fully
-air-gapped, set `web.enabled: false` in `config.yaml` and the tools disappear
-from GT's toolset entirely.
+**Permissions** (`gt/permissions.py`). Claude-Code-style: every prompt offers
+**yes once / always allow / no**. Grants are coarse and readable — `files`
+(writes/edits), `docs` (Excel/PPT/Word), `cmd:git`-style per-command prefixes —
+and persist in `data/permissions.json`. A dangerous-command regex overrides
+everything and always asks.
 
-**Memory / RAG** (`gt/memory.py`). `nomic-embed-text` turns text into vectors
-stored in a plain **sqlite** file; search is brute-force cosine similarity in
-numpy. No Chroma/FAISS/native builds to fight on Windows. Three kinds share one
-store: `note` (things you tell it), `doc` (indexed files), `lesson` (below).
-Relevant memories are pulled into context automatically each turn.
+**Clarify → plan → execute → verify** (`gt/prompts.py` + the `ask_user` tool).
+The system prompt teaches the workflow; `ask_user` lets the model stop
+mid-task and ask *you* a question — that's how it clarifies requirements and
+confirms its architecture plan before writing code.
 
-**Self-improvement** (`gt/improve.py`). After each task, **Hermes** reads the
-interaction and tries to distill one reusable, generalizable lesson (“Prefer
-editing over rewriting whole files,” etc.). Lessons go into memory and resurface
-on similar future requests. It’s learning by *retrieval*, not fine-tuning — fully
-local, transparent, and reversible (`/forget lesson`).
+**Routing** (`gt/router.py`). Cheap heuristics first (small talk → `tiny`,
+code signals → `brain`); only ambiguous requests cost a one-word
+classification from the 3B model. Pin with `/model brain`.
 
-**Safety.** `write_file`, `edit_file`, and `run_command` ask for approval before
-touching your machine. `/auto` turns that off when you trust it.
+**Agent loop** (`gt/agent.py`). A **prompt-based JSON tool protocol** (not
+native function-calling) so it behaves identically across Qwen and Llama. The
+model emits one JSON block per tool call; GT runs it, feeds back the result,
+loops until a plain-text answer. Output streams as live markdown (`gt/ui.py`).
+
+**Documents** (`gt/office.py`). `create_excel` (openpyxl — bold headers,
+auto-width, frozen header row), `create_powerpoint` (python-pptx — title
+slide, bullets, speaker notes), `create_word` (python-docx — headings,
+paragraphs, bullet lists). All pure-Python, Windows-friendly wheels.
+
+**Memory / RAG** (`gt/memory.py`). `nomic-embed-text` vectors in plain
+**sqlite**, brute-force cosine in numpy — no native builds to fight on
+Windows. Kinds: `note`, `doc`, `lesson`.
+
+**Self-improvement** (`gt/improve.py`). After each task the `reviewer` model
+distills one reusable lesson into memory. Learning by retrieval, not
+fine-tuning — transparent and reversible (`/forget lesson`).
 
 ---
 
@@ -179,7 +179,7 @@ router:
   enabled: true      # auto-pick a model per request
   default: brain     # fallback when unsure
 agent:
-  max_steps: 12      # tool iterations before GT must answer
+  max_steps: 20      # tool iterations before GT must answer
   auto_approve: false
 memory:
   auto_learn: true   # extract a lesson after each task
@@ -189,14 +189,16 @@ web:
   enabled: true      # web_search / web_fetch tools; false = fully offline
 ```
 
-To use **only Ollama** (skip LM Studio), point `brain` and `reviewer` at Ollama
-models too — e.g. set both providers to `ollama` and pick larger local models.
+The `models:` section is a default for mid-range machines — the wizard's
+per-machine choice (saved in `data/setup.json`) overrides it at launch.
+LM Studio remains an optional fallback provider if its server is running.
 
 ---
 
 ## Extending GT
 
-**Add a tool** — in `gt/tools.py`, subclass `Tool`, then add it to `ALL_TOOLS`:
+**Add a tool** — subclass `Tool` (from `gt/base.py`) in `gt/tools.py`, add it
+to `ALL_TOOLS`:
 
 ```python
 class WordCount(Tool):
@@ -206,17 +208,15 @@ class WordCount(Tool):
     def run(self, args, ctx):
         p = ctx.resolve(args["path"])
         return f"{len(p.read_text(encoding='utf-8').split())} words"
-
-ALL_TOOLS = [..., WordCount()]
 ```
 
 The system prompt is generated from the registry, so the model learns the new
-tool automatically — no other changes needed. (Web search, file editing, and
-shell access already ship built-in — see `gt/tools.py` for examples.)
+tool automatically. Tools that change the machine should call
+`ctx.approve(title, detail, key="...")` first.
 
-**Swap models** — just edit the role → model mapping in `config.yaml`.
+**Swap models** — `/setup` re-picks per machine, or edit `config.yaml`.
 
-**Change GT’s personality / rules** — edit `SYSTEM_TEMPLATE` in `gt/prompts.py`.
+**Change GT’s personality / workflow** — edit `SYSTEM_TEMPLATE` in `gt/prompts.py`.
 
 ---
 
@@ -224,14 +224,14 @@ shell access already ship built-in — see `gt/tools.py` for examples.)
 
 | Symptom | Fix |
 |--------|-----|
-| `Can't reach lmstudio` | Open LM Studio → Developer tab → **Start Server**, and load a model |
 | `Can't reach ollama` | Ensure Ollama is installed/running (open http://localhost:11434) |
-| `HTTP 404 ... model not found` | Rare — auto-resolve fixes ids at launch. Check `/models` and `config.yaml`. |
-| `model not found, try pulling it` | Re-run `setup.bat` (or `ollama pull` the model it names) |
+| Wizard says Ollama missing | Install it (`winget install Ollama.Ollama` / `brew install ollama`), then `/setup` |
+| `model not found, try pulling it` | `/setup` again, or `ollama pull` the model it names |
 | `'python' is not recognized` | Reinstall Python with **Add to PATH**, or use `py -3` |
-| First reply from the 28B is slow | Normal — LM Studio loads it into RAM/VRAM on first call |
+| First reply from the 14B is slow | Normal — Ollama loads it into RAM/VRAM on first call |
 | Router feels laggy | `/route` off, or `/model brain` to pin the big model |
 | `web search failed (offline?)` | No internet, or set `web.enabled: false` to hide the web tools |
+| Office tool says a package is missing | `pip install openpyxl python-pptx python-docx` in the `.venv` (or re-run setup) |
 
 ---
 
@@ -243,9 +243,9 @@ A dependency-free logic test (no models needed) lives in `tests/`:
 .venv\Scripts\python.exe -m tests.smoke_test
 ```
 
-It checks config loading, tool-call parsing, chunking, the file tools, web-tool
-gating + URL parsing, the streaming renderer, and the router heuristics. All 25
-checks should pass.
+It checks config loading, tool-call parsing, the file/office/ask tools,
+hardware tiering, the permission system, web-tool gating, the streaming
+renderer, and the router heuristics. All 42 checks should pass.
 
 ---
 
@@ -253,20 +253,25 @@ checks should pass.
 
 ```
 GT-code/
-  config.yaml          your models + settings  (edit this)
+  config.yaml          roles + settings (wizard overrides per machine)
   requirements.txt     dependencies
-  setup.bat / .sh      one-shot installer (deps + Ollama + models + `gt` cmd)
+  setup.bat / .sh      one-shot installer (deps + Ollama + baseline models + `gt` cmd)
   start.bat / .sh      launch GT without the global `gt` command
   gt/
     cli.py             the terminal + slash commands
+    wizard.py          first-launch setup (hardware → models → downloads)
+    machine.py         hardware probe + model tier recommendation
+    permissions.py     Claude-Code-style permission grants
     router.py          picks a model per request
     agent.py           the agentic tool loop
-    tools.py           file / shell / search / web / recall tools
+    base.py            Tool base class + tool-call context
+    tools.py           file / shell / search / web / ask_user / recall tools
+    office.py          create_excel / create_powerpoint / create_word
     memory.py          sqlite + nomic-embed vector store
     improve.py         self-improving lesson extractor
     llm.py             OpenAI-compatible client (Ollama + LM Studio)
     ui.py              live streaming-markdown renderer
-    prompts.py         system prompt
+    prompts.py         system prompt (clarify → plan → execute → verify)
     config.py          config loader
   tests/
     smoke_test.py      offline sanity checks
