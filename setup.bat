@@ -84,25 +84,48 @@ for %%M in (llama3.2:3b nomic-embed-text) do (
 )
 
 REM --- put a global "gt" command on PATH ---
-REM WindowsApps is user-writable and already on PATH on Windows 10/11.
 REM The shim calls the venv's own gt.exe: GT always runs from its OWN venv
 REM here in the GT-code folder, and operates on whatever folder you're in.
-set "SHIM=%LOCALAPPDATA%\Microsoft\WindowsApps\gt.cmd"
+REM
+REM We install the shim into %USERPROFILE%\.gt\bin and add THAT to the user
+REM PATH ourselves. (Relying on the WindowsApps folder breaks on managed /
+REM corporate laptops where it isn't on PATH - the classic
+REM "'gt' is not recognized" error.)
+set "GTBIN=%USERPROFILE%\.gt\bin"
+if not exist "%GTBIN%" mkdir "%GTBIN%" >nul 2>nul
 (
   echo @echo off
-  echo "%CD%\.venv\Scripts\gt.exe" %%*
-) > "%SHIM%" 2>nul
-if exist "%SHIM%" (
-  echo Installed the "gt" command.
-) else (
-  echo [WARN] Couldn't create %SHIM% - use start.bat instead.
+  echo "%~dp0.venv\Scripts\gt.exe" %%*
+) > "%GTBIN%\gt.cmd"
+if not exist "%GTBIN%\gt.cmd" (
+  echo [WARN] Couldn't create %GTBIN%\gt.cmd - use start.bat instead.
 )
 
-REM --- sanity check: the command must work from a DIFFERENT directory ---
-pushd "%TEMP%"
-call "%SHIM%" --version >nul 2>nul
+REM Also drop the old WindowsApps shim; harmless where it works, and it
+REM keeps existing installs consistent. Failure here is fine.
+(
+  echo @echo off
+  echo "%~dp0.venv\Scripts\gt.exe" %%*
+) > "%LOCALAPPDATA%\Microsoft\WindowsApps\gt.cmd" 2>nul
+
+REM Add %USERPROFILE%\.gt\bin to the USER Path (persistent + idempotent).
+powershell -NoProfile -Command "$bin=$env:USERPROFILE+'\.gt\bin'; $p=[Environment]::GetEnvironmentVariable('Path','User'); if([string]::IsNullOrEmpty($p)){ [Environment]::SetEnvironmentVariable('Path',$bin,'User'); 'Added '+$bin+' to your PATH.' } elseif(($p -split ';') -notcontains $bin){ [Environment]::SetEnvironmentVariable('Path',($p.TrimEnd(';')+';'+$bin),'User'); 'Added '+$bin+' to your PATH.' } else { 'PATH already set up.' }"
 if errorlevel 1 (
-  echo [WARN] "gt" self-test failed - report this with a screenshot.
+  echo [WARN] Could not update your PATH automatically. Add this folder to
+  echo        your user PATH by hand:  %GTBIN%
+)
+
+REM Make it work in THIS window too (new terminals pick up the user PATH).
+set "PATH=%GTBIN%;%PATH%"
+
+REM --- sanity check: 'gt' must resolve via PATH from a DIFFERENT directory ---
+pushd "%TEMP%"
+call gt --version >nul 2>nul
+if errorlevel 1 (
+  echo [WARN] "gt" self-test failed.
+  echo        Try a NEW terminal first. If it still fails, launch GT with:
+  echo          %~dp0start.bat
+  echo        and report this with a screenshot.
 ) else (
   echo Self-test OK: "gt" works from any folder.
 )

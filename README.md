@@ -235,6 +235,7 @@ tool automatically. Tools that change the machine should call
 | `model not found, try pulling it` | `/setup` again, or `ollama pull` the model it names |
 | `'python' is not recognized` | Reinstall Python with **Add to PATH**, or use `py -3` |
 | `No module named gt` when typing `gt` | Your install predates v0.2 — `git pull` in the GT-code folder and re-run `setup.bat` / `./setup.sh` (it now pip-installs GT into its venv and self-tests from another folder) |
+| `'gt' is not recognized...` (Windows) | `git pull` + re-run `setup.bat`: it now installs the command to `%USERPROFILE%\.gt\bin` and adds that to your user PATH itself (managed/corporate laptops often don't have the WindowsApps folder on PATH). Then **open a new terminal**. Still stuck? `start.bat` in the GT-code folder always works |
 | `gt` opens the wrong folder | GT works on the folder you run it from; use `gt <path>` or `/cd` inside GT |
 | First reply from the 14B is slow | Normal — Ollama loads it into RAM/VRAM on first call |
 | Router feels laggy | `/route` off, or `/model brain` to pin the big model |
