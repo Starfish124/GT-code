@@ -14,11 +14,13 @@ if ! command -v python3 >/dev/null 2>&1; then
   exit 1
 fi
 
-# --- venv + deps ---
+# --- venv + editable install ---
 [ -x .venv/bin/python ] || { echo "Creating virtual environment in .venv ..."; python3 -m venv .venv; }
-echo "Installing Python dependencies ..."
+echo "Installing GT-Code into its own environment ..."
 ./.venv/bin/python -m pip install -q --upgrade pip
-./.venv/bin/python -m pip install -q -r requirements.txt
+# Editable install: puts the 'gt' package AND a real 'gt' command inside the
+# venv, so GT launches from ANY folder (no more "No module named gt").
+./.venv/bin/python -m pip install -q -e .
 
 # --- Ollama: install automatically if missing ---
 if ! command -v ollama >/dev/null 2>&1; then
@@ -48,11 +50,12 @@ for m in llama3.2:3b nomic-embed-text; do
 done
 
 # --- put a global "gt" command on PATH ---
+# The shim calls the venv's own gt entry point: GT always runs from its OWN
+# venv here in the GT-code folder, and operates on whatever folder you're in.
 mkdir -p "$HOME/.local/bin"
 cat > "$HOME/.local/bin/gt" <<EOF
 #!/usr/bin/env bash
-# Launch GT-Code from anywhere; it works on the folder you run it in.
-exec "$PWD/.venv/bin/python" -m gt "\$@"
+exec "$PWD/.venv/bin/gt" "\$@"
 EOF
 chmod +x "$HOME/.local/bin/gt" start.sh
 case ":$PATH:" in
@@ -62,6 +65,13 @@ case ":$PATH:" in
     echo "[i] Installed ~/.local/bin/gt — add this to your shell profile to use it:"
     echo '    export PATH="$HOME/.local/bin:$PATH"' ;;
 esac
+
+# --- sanity check: the command must work from a DIFFERENT directory ---
+if (cd /tmp && "$HOME/.local/bin/gt" --version >/dev/null 2>&1); then
+  echo "Self-test OK: 'gt' works from any folder."
+else
+  echo "[WARN] 'gt' self-test failed — run it as: $PWD/.venv/bin/gt"
+fi
 
 # --- LM Studio is optional: bigger brain when present ---
 echo

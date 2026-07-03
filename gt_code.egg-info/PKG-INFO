@@ -1,8 +1,24 @@
-GT-Code your own local coding agent!
+Metadata-Version: 2.4
+Name: gt-code
+Version: 0.2.0
+Summary: GT-Code: a local, self-hosted CLI coding agent (Claude-Code-style) running on your own models
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: requests>=2.31
+Requires-Dist: PyYAML>=6.0
+Requires-Dist: numpy>=1.26
+Requires-Dist: rich>=13.7
+Requires-Dist: prompt_toolkit>=3.0
+Requires-Dist: beautifulsoup4>=4.12
+Requires-Dist: openpyxl>=3.1
+Requires-Dist: python-pptx>=0.6.23
+Requires-Dist: python-docx>=1.1
+
+# GT-Code — your own local coding agent
 
 A small, self-hosted CLI coding assistant — like Claude Code, but running
 **entirely on your machine** against your local models. No cloud, no API keys,
-no data leaving your PC. boom.
+no data leaving your PC.
 
 On **first launch it evaluates your hardware** (RAM, CPU, GPU/VRAM), tells you
 what this machine can handle, and offers to download the right models — 3B
@@ -51,20 +67,14 @@ cd GT-code
 setup.bat          ::  macOS/Linux:  ./setup.sh
 ```
 
-The script installs GT-Code into **its own `.venv` inside the GT-code folder**
-(one environment for GT itself — never one per project), **installs Ollama** if
+The script creates the `.venv`, installs dependencies, **installs Ollama** if
 missing (winget on Windows, brew/curl elsewhere), pulls the tiny baseline
-models (~2.3 GB), installs a global **`gt` command**, and self-tests that the
-command works from a different folder. Then:
+models (~2.3 GB), and installs a global **`gt` command**. Then:
 
 ```bat
 cd C:\any\project
 gt
 ```
-
-GT always runs from its own environment and **operates on whatever folder you
-launch it from** — your projects need no venv, no setup, nothing. `gt <path>`
-opens a specific folder; `gt --version` checks the install.
 
 **First launch runs the setup wizard**: it probes your hardware, shows a
 verdict ("16 GB RAM comfortably fits a 14B model…"), and asks before
@@ -234,8 +244,6 @@ tool automatically. Tools that change the machine should call
 | Wizard says Ollama missing | Install it (`winget install Ollama.Ollama` / `brew install ollama`), then `/setup` |
 | `model not found, try pulling it` | `/setup` again, or `ollama pull` the model it names |
 | `'python' is not recognized` | Reinstall Python with **Add to PATH**, or use `py -3` |
-| `No module named gt` when typing `gt` | Your install predates v0.2 — `git pull` in the GT-code folder and re-run `setup.bat` / `./setup.sh` (it now pip-installs GT into its venv and self-tests from another folder) |
-| `gt` opens the wrong folder | GT works on the folder you run it from; use `gt <path>` or `/cd` inside GT |
 | First reply from the 14B is slow | Normal — Ollama loads it into RAM/VRAM on first call |
 | Router feels laggy | `/route` off, or `/model brain` to pin the big model |
 | `web search failed (offline?)` | No internet, or set `web.enabled: false` to hide the web tools |

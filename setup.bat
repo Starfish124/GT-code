@@ -35,9 +35,11 @@ if not exist ".venv\Scripts\python.exe" (
   )
 )
 
-echo Installing Python dependencies ...
+echo Installing GT-Code into its own environment ...
 call ".venv\Scripts\python.exe" -m pip install --quiet --upgrade pip
-call ".venv\Scripts\python.exe" -m pip install --quiet -r requirements.txt
+REM Editable install: puts the 'gt' package AND a real 'gt' command inside
+REM the venv, so GT launches from ANY folder (no more "No module named gt").
+call ".venv\Scripts\python.exe" -m pip install --quiet -e .
 if errorlevel 1 (
   echo [ERROR] pip install failed. Check your internet connection.
   pause
@@ -83,16 +85,28 @@ for %%M in (llama3.2:3b nomic-embed-text) do (
 
 REM --- put a global "gt" command on PATH ---
 REM WindowsApps is user-writable and already on PATH on Windows 10/11.
+REM The shim calls the venv's own gt.exe: GT always runs from its OWN venv
+REM here in the GT-code folder, and operates on whatever folder you're in.
 set "SHIM=%LOCALAPPDATA%\Microsoft\WindowsApps\gt.cmd"
 (
   echo @echo off
-  echo "%CD%\.venv\Scripts\python.exe" -m gt %%*
+  echo "%CD%\.venv\Scripts\gt.exe" %%*
 ) > "%SHIM%" 2>nul
 if exist "%SHIM%" (
   echo Installed the "gt" command.
 ) else (
   echo [WARN] Couldn't create %SHIM% - use start.bat instead.
 )
+
+REM --- sanity check: the command must work from a DIFFERENT directory ---
+pushd "%TEMP%"
+call "%SHIM%" --version >nul 2>nul
+if errorlevel 1 (
+  echo [WARN] "gt" self-test failed - report this with a screenshot.
+) else (
+  echo Self-test OK: "gt" works from any folder.
+)
+popd
 
 REM --- LM Studio is optional: bigger brain when present ---
 echo.
