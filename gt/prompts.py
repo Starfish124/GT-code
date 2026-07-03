@@ -50,9 +50,12 @@ ask_user for genuine decisions the user must make.
 
 # Available tools
 {tools}
-{memory}"""
+{skills}{memory}"""
 
 
-def build_system(cwd: str, os_name: str, tools: str, memory_block: str) -> str:
+def build_system(cwd: str, os_name: str, tools: str, memory_block: str,
+                 skills_block: str = "") -> str:
     mem = f"\n\n# Relevant memory & learned lessons\n{memory_block}" if memory_block else ""
-    return SYSTEM_TEMPLATE.format(cwd=cwd, os=os_name, tools=tools, memory=mem)
+    sk = f"\n\n{skills_block}" if skills_block else ""
+    return SYSTEM_TEMPLATE.format(cwd=cwd, os=os_name, tools=tools,
+                                  skills=sk, memory=mem)

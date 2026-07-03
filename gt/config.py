@@ -45,6 +45,10 @@ memory:
   recall_k: 5
   min_score: 0.28
 
+skills:
+  enabled: true
+  max: 2
+
 web:
   enabled: true
 

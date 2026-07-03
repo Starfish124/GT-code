@@ -20,7 +20,14 @@ echo "Installing GT-Code into its own environment ..."
 ./.venv/bin/python -m pip install -q --upgrade pip
 # Editable install: puts the 'gt' package AND a real 'gt' command inside the
 # venv, so GT launches from ANY folder (no more "No module named gt").
-./.venv/bin/python -m pip install -q -e .
+
+# Document tools are optional - Excel/PowerPoint/Word creation.
+read -r -p "Install document tools (Excel/PowerPoint/Word creation)? [Y/n] " DOCTOOLS || DOCTOOLS=Y
+if [ "$DOCTOOLS" = "n" ] || [ "$DOCTOOLS" = "N" ]; then
+  ./.venv/bin/python -m pip install -q -e .
+else
+  ./.venv/bin/python -m pip install -q -e ".[docs]"
+fi
 
 # --- Ollama: install automatically if missing ---
 if ! command -v ollama >/dev/null 2>&1; then

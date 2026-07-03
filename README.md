@@ -119,6 +119,7 @@ Destructive-looking commands (`rm -rf`, `format`, `del /s`, forced pushes…)
 | `/model <role\|off>` | Pin a model (`brain`/`fast`/`tiny`) or `off` to auto-route |
 | `/route` | Toggle smart auto-routing |
 | `/think` | Toggle deep-thinking mode (slower, more careful; off by default) |
+| `/skills` | List the expert playbooks GT injects per request |
 | `/auto` | Toggle auto-approve (dangerous commands still prompt) |
 | `/permissions` | List standing grants; `/permissions clear` revokes all |
 | `/cd <path>` | Change the working directory GT operates in |
@@ -131,6 +132,40 @@ Destructive-looking commands (`rm -rf`, `format`, `del /s`, forced pushes…)
 | `/quit` | Exit |
 
 ---
+
+## Skills — embedded expertise the local models don't have
+
+Local models can execute, but they arrive with no *taste*: they've never
+seen what a consultant-grade spreadsheet or a designed landing page looks
+like. GT ships with a curated **skills library** (`skills/*.md`) — expert
+playbooks written once, injected automatically:
+
+| Playbook | Kicks in when you ask for… |
+|---|---|
+| `excel` | spreadsheets — summary sheet first, headers with units, totals, assumptions |
+| `powerpoint` | decks — takeaway titles, one idea per slide, speaker notes |
+| `word-docs` | reports — executive summary, verb-led recommendations |
+| `frontend` | HTML/UI — design system, spacing scale, hover states, single-file rule |
+| `backend` | APIs — REST conventions, validation at the edge, one error shape |
+| `code-quality` | any code — naming, small functions, verify-before-done |
+| `debugging` | bugs — reproduce → read the error → one hypothesis at a time |
+| `project-setup` | new projects — scaffold, README, git, prove hello-world runs |
+
+Per request GT matches trigger keywords and injects at most 2 playbooks
+(~1-2k tokens) into the model's context — you'll see
+`· playbooks: excel` before it starts. `/skills` lists them all.
+
+**Why playbooks and not gigabytes of docs:** an 8K context window means the
+model can only *see* a few thousand tokens of guidance at once. Two sharp,
+curated pages at exactly the right moment beat 3 GB of retrieved
+documentation fragments. For big reference corpora you control, that's what
+`/index` (RAG) is for — index MDN, your style guide, or a framework's docs
+and GT recalls the relevant chunks.
+
+**Add your own:** drop a `.md` into `~/.gt/skills/` (or `skills/` in the
+repo) with the same front matter (`name`, `triggers`, `priority`) — same-name
+files in `~/.gt/skills/` override the shipped ones. Team-wide skills are just
+files in git.
 
 ## Performance — why GT feels snappy (and what the numbers mean)
 

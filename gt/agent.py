@@ -18,6 +18,7 @@ from pathlib import Path
 from rich.text import Text
 
 from .prompts import build_system
+from .skills import load_skills, select, skills_block
 from .tools import Ctx, active_tools, tool_docs
 from .ui import streaming_markdown
 from .llm import LLMError
@@ -66,6 +67,11 @@ class Agent:
         self.tools = {t.name: t for t in active_tools(config)}
         self.tool_docs = tool_docs(self.tools.values())
 
+        # Expert playbooks, matched per-request and injected into context.
+        skills_cfg = config.data.get("skills", {})
+        self.skills = load_skills() if skills_cfg.get("enabled", True) else []
+        self.skills_max = int(skills_cfg.get("max", 2))
+
     # ---- public API ---------------------------------------------------------
 
     def run(self, user_msg):
@@ -74,11 +80,16 @@ class Agent:
                            f"({self.config.model_for(role)['model']})[/dim]")
 
         memory_block = self._recall(user_msg)
+        picked = select(self.skills, user_msg, limit=self.skills_max)
+        if picked:
+            self.console.print(
+                f"[dim]· playbooks: {', '.join(s.name for s in picked)}[/dim]")
         system = build_system(
             cwd=str(self.cwd),
             os_name=platform.system(),
             tools=self.tool_docs,
             memory_block=memory_block,
+            skills_block=skills_block(picked),
         )
 
         # Working message list for this turn (includes intermediate tool steps).

@@ -39,6 +39,7 @@ HELP = """\
   /model <role|off>  pin a model role (brain/fast/tiny) or 'off' to auto-route
   /route             toggle smart auto-routing on/off
   /think             toggle deep thinking (Qwen3 reasoning mode; off = snappy)
+  /skills            list the expert playbooks GT injects per request
   /auto              toggle auto-approve (skip y/n prompts for writes & commands)
   /permissions       show granted permissions; '/permissions clear' revokes all
   /cd <path>         change the workspace directory GT operates in
@@ -161,6 +162,8 @@ class GTShell:
                 + ("[yellow](slower, more careful — Qwen3 reasons before "
                    "answering)[/yellow]" if on
                    else "[dim](snappy default)[/dim]"))
+        elif cmd == "/skills":
+            self._show_skills()
         elif cmd == "/setup":
             wizard.ensure(self.config, self.llm, self.console,
                           self.session.prompt, force=True)
@@ -213,6 +216,23 @@ class GTShell:
                 pass  # warmup is best-effort; real calls will surface errors
 
         threading.Thread(target=go, daemon=True).start()
+
+    def _show_skills(self):
+        if not self.agent.skills:
+            self.console.print("[dim]no skills loaded (skills/ folder missing "
+                               "or skills.enabled: false).[/dim]")
+            return
+        table = Table(title="Expert playbooks (auto-injected per request)")
+        table.add_column("skill", style="cyan")
+        table.add_column("~words")
+        table.add_column("triggers", style="dim")
+        for s in sorted(self.agent.skills, key=lambda s: s.name):
+            table.add_row(s.name, str(s.words), ", ".join(s.triggers[:8])
+                          + ("…" if len(s.triggers) > 8 else ""))
+        self.console.print(table)
+        self.console.print("[dim]Add your own: drop a .md file with the same "
+                           "front matter into ~/.gt/skills/ (or skills/ in the "
+                           "GT-code folder).[/dim]")
 
     def _permissions(self, arg):
         if arg.strip().lower() == "clear":

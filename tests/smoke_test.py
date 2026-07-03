@@ -155,6 +155,30 @@ check("command_key normalises paths",
       command_key("C:\\Python\\python.exe -m pip install x") == "cmd:python")
 store.unlink(missing_ok=True)
 
+print("\nskills — expert playbooks matched per request")
+from gt.skills import load_skills, select, skills_block
+skills = load_skills()
+names = {s.name for s in skills}
+check("all 8 shipped playbooks load",
+      {"excel", "powerpoint", "frontend", "backend", "code-quality",
+       "word-docs", "debugging", "project-setup"} <= names)
+check("excel request -> excel playbook",
+      [s.name for s in select(skills, "make me an excel file of Q3 sales")]
+      [:1] == ["excel"])
+check("landing page -> frontend playbook",
+      "frontend" in [s.name for s in select(skills, "build a landing page in html")])
+check("deck request -> powerpoint playbook",
+      "powerpoint" in [s.name for s in select(skills, "turn this into a 5 slide deck")])
+check("bug report -> debugging playbook",
+      "debugging" in [s.name for s in select(skills, "fix this traceback error")])
+check("at most 2 playbooks injected",
+      len(select(skills, "debug the code error in my html api backend excel")) <= 2)
+check("no match -> no injection", select(skills, "hello there") == [])
+check("block renders with header",
+      skills_block(select(skills, "excel please")).startswith("# Expert playbooks"))
+check("playbooks stay context-lean (<700 words each)",
+      all(s.words < 700 for s in skills))
+
 print("\nrouter heuristics (no LLM call) — the 3B/8B/14B speed ladder")
 r = Router(llm=None, config=cfg)
 check("small talk -> tiny", r.route("hi") == "tiny")

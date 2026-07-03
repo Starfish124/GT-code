@@ -63,6 +63,12 @@ memory:
   recall_k: 5           # how many memories/lessons to pull into context per turn
   min_score: 0.28       # ignore memories below this similarity (0..1)
 
+skills:
+  enabled: true         # inject expert playbooks (skills/*.md) matched to each
+                        # request — how to write good code, Claude-style Excel/
+                        # PowerPoint/frontend, debugging discipline, etc.
+  max: 2                # at most N playbooks per request (context budget)
+
 web:
   enabled: true         # allow the web_search / web_fetch tools (needs internet).
                         # set false to keep GT fully air-gapped/offline.

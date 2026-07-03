@@ -61,7 +61,15 @@ echo Installing GT-Code into its own environment ...
 call ".venv\Scripts\python.exe" -m pip install --quiet --upgrade pip
 REM Editable install: puts the 'gt' package AND a real 'gt' command inside
 REM the venv, so GT launches from ANY folder (no more "No module named gt").
-call ".venv\Scripts\python.exe" -m pip install --quiet -e .
+
+REM Document tools are optional - Excel/PowerPoint/Word creation.
+set "DOCTOOLS=Y"
+set /p DOCTOOLS="Install document tools (Excel/PowerPoint/Word creation)? [Y/n] "
+if /i "%DOCTOOLS%"=="n" (
+  call ".venv\Scripts\python.exe" -m pip install --quiet -e .
+) else (
+  call ".venv\Scripts\python.exe" -m pip install --quiet -e ".[docs]"
+)
 if errorlevel 1 (
   echo [ERROR] pip install failed. Check your internet connection.
   pause
