@@ -11,6 +11,7 @@ Three kinds of memory share one table:
 """
 
 import sqlite3
+import threading
 import time
 from pathlib import Path
 
@@ -22,8 +23,11 @@ class Memory:
         self.llm = llm
         self.embed_role = embed_role
         self.db_path = str(db_path)
+        # The self-improve loop writes lessons from a background thread, so
+        # the connection must be shareable; the lock serializes writes.
+        self._lock = threading.Lock()
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(self.db_path)
+        self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self.conn.execute(
             """CREATE TABLE IF NOT EXISTS memory(
                  id        INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -53,12 +57,13 @@ class Memory:
         for (text, kind, source), emb in zip(items, embs):
             arr = np.asarray(emb, dtype=np.float32)
             rows.append((kind, text, source, arr.tobytes(), int(arr.shape[0]), now))
-        self.conn.executemany(
-            "INSERT INTO memory(kind,text,source,embedding,dim,created) "
-            "VALUES(?,?,?,?,?,?)",
-            rows,
-        )
-        self.conn.commit()
+        with self._lock:
+            self.conn.executemany(
+                "INSERT INTO memory(kind,text,source,embedding,dim,created) "
+                "VALUES(?,?,?,?,?,?)",
+                rows,
+            )
+            self.conn.commit()
         return len(rows)
 
     # ---- reads --------------------------------------------------------------
@@ -111,11 +116,12 @@ class Memory:
         return cur.fetchall()
 
     def clear(self, kind=None):
-        if kind:
-            self.conn.execute("DELETE FROM memory WHERE kind=?", (kind,))
-        else:
-            self.conn.execute("DELETE FROM memory")
-        self.conn.commit()
+        with self._lock:
+            if kind:
+                self.conn.execute("DELETE FROM memory WHERE kind=?", (kind,))
+            else:
+                self.conn.execute("DELETE FROM memory")
+            self.conn.commit()
 
 
 # ---- chunking helper (used by /index) --------------------------------------

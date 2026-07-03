@@ -29,11 +29,16 @@ models:
 
 router:
   enabled: true
-  default: brain
+  default: fast
 
 agent:
   max_steps: 20
   auto_approve: false
+
+performance:
+  thinking: false
+  keep_alive: 30m
+  num_ctx: 8192
 
 memory:
   auto_learn: true
@@ -121,6 +126,7 @@ class Config:
         self.agent = data.get("agent", {})
         self.memory = data.get("memory", {})
         self.web = data.get("web", {})
+        self.performance = data.get("performance", {})
         # data (memory db, history, permissions, setup marker) lives NEXT TO
         # the config file, never in the user's project directory.
         raw = data.get("data_dir", "data")

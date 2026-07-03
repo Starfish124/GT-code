@@ -118,6 +118,7 @@ Destructive-looking commands (`rm -rf`, `format`, `del /s`, forced pushes…)
 | `/models` | Show the exact model ids Ollama + LM Studio serve |
 | `/model <role\|off>` | Pin a model (`brain`/`fast`/`tiny`) or `off` to auto-route |
 | `/route` | Toggle smart auto-routing |
+| `/think` | Toggle deep-thinking mode (slower, more careful; off by default) |
 | `/auto` | Toggle auto-approve (dangerous commands still prompt) |
 | `/permissions` | List standing grants; `/permissions clear` revokes all |
 | `/cd <path>` | Change the working directory GT operates in |
@@ -130,6 +131,47 @@ Destructive-looking commands (`rm -rf`, `format`, `del /s`, forced pushes…)
 | `/quit` | Exit |
 
 ---
+
+## Performance — why GT feels snappy (and what the numbers mean)
+
+Local agents usually feel slow for reasons that have nothing to do with model
+quality. GT attacks all of them:
+
+**The speed ladder.** The 3B routes and handles small talk (instant), the
+**8B is the workhorse** for everyday coding and stays hot in RAM, and the 14B
+is reserved for what actually needs deep reasoning — architecture, planning,
+complex design. Sending everything to the biggest model is what kills local
+agents: every model swap can cost 10–60 s of loading before the first token.
+
+**Hidden "thinking" off by default.** Qwen3 models silently generate hundreds
+of internal reasoning tokens before answering — measured on the same question:
+13 tokens without thinking vs 134 with. GT disables it by default and gives
+you `/think` to turn it back on when you *want* slow-and-careful.
+
+**Models stay loaded.** GT uses Ollama's native API with `keep_alive: 30m`,
+so a model loads once and stays hot. At startup (and whenever you `/model`
+pin), GT pre-warms the model **in the background while you type your first
+prompt**.
+
+**Nothing blocks you.** Lesson-extraction (the self-improve loop) runs on a
+background thread after your answer is already delivered. Oversized tool
+outputs are trimmed before re-entering context so later steps don't pay
+ever-growing prompt-processing costs.
+
+**You see where time goes.** While waiting you get a live counter
+(`⠹ waiting for fast (qwen3:8b) — 3.2s`), and after every response a real
+measurement straight from Ollama:
+
+```
+⏱ model load 8.2s · prompt 1.1s (1312 tok) · 34 tok/s × 412 tok · total 21.3s
+```
+
+If `model load` shows up, that was a one-time cost (model got evicted or
+first use). If `prompt` dominates, the context is big. If tok/s is low, the
+model is too big for the hardware — `/setup` re-evaluates the tier.
+
+Tuning knobs in `config.yaml` under `performance:`: `thinking`, `keep_alive`,
+`num_ctx`.
 
 ## How it works (the interesting part)
 

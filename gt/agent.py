@@ -12,6 +12,7 @@ Flow per user turn:
 import json
 import platform
 import re
+import threading
 from pathlib import Path
 
 from rich.text import Text
@@ -88,15 +89,20 @@ class Agent:
         ctx = Ctx(cwd=self.cwd, memory=self.memory,
                   approve=self.approve, config=self.config, ask=self.ask)
 
+        model_id = self.config.model_for(role)["model"]
         final_answer = None
         for step in range(1, self.max_steps + 1):
             try:
-                with streaming_markdown(self.console) as (on_token, _buf):
+                with streaming_markdown(
+                    self.console,
+                    waiting_label=f"waiting for {role} ({model_id})",
+                ) as (on_token, _buf):
                     reply = self.llm.chat(role, messages, stream=True,
                                           on_token=on_token)
             except LLMError as e:
                 self.console.print(f"[red]LLM error:[/red] {e}")
                 return
+            self._print_timing()
 
             messages.append({"role": "assistant", "content": reply})
             call = extract_tool_call(reply)
@@ -106,6 +112,10 @@ class Agent:
                 break
 
             observation = self._run_tool(call, ctx)
+            # Cap what goes back into context — huge tool outputs slow every
+            # later step's prefill without adding much signal.
+            if len(observation) > 6000:
+                observation = observation[:6000] + "\n... [truncated for context]"
             messages.append({
                 "role": "user",
                 "content": f"[tool result: {call['tool']}]\n{observation}",
@@ -120,9 +130,12 @@ class Agent:
         if final_answer:
             self.history.append({"role": "assistant", "content": final_answer})
 
-        # Self-improvement (optional, best-effort, never blocks the user).
+        # Self-improvement — in the background so the prompt returns NOW
+        # instead of making the user wait for the reviewer model.
         if final_answer and self.config.memory.get("auto_learn", True):
-            self._maybe_learn(user_msg, final_answer)
+            threading.Thread(target=self._maybe_learn,
+                             args=(user_msg, final_answer),
+                             daemon=True).start()
 
         return final_answer
 
@@ -130,6 +143,23 @@ class Agent:
         self.history.clear()
 
     # ---- internals ----------------------------------------------------------
+
+    def _print_timing(self):
+        """One dim line of real numbers after every model response, straight
+        from Ollama: where the time went and how fast generation ran."""
+        m = self.llm.last_metrics
+        if not m:
+            return
+        parts = []
+        if m.get("load_s", 0) > 0.5:
+            parts.append(f"model load {m['load_s']:.1f}s")
+        if m.get("prefill_s", 0) > 0.5:
+            parts.append(f"prompt {m['prefill_s']:.1f}s"
+                         + (f" ({m['prompt_tokens']} tok)" if m.get("prompt_tokens") else ""))
+        if m.get("tps"):
+            parts.append(f"{m['tps']:.0f} tok/s × {m['tokens']} tok")
+        parts.append(f"total {m.get('total_s', 0):.1f}s")
+        self.console.print(f"[dim]  ⏱ {' · '.join(parts)}[/dim]")
 
     def _run_tool(self, call, ctx):
         name = call.get("tool")

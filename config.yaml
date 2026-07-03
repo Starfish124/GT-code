@@ -46,11 +46,17 @@ models:
 
 router:
   enabled: true         # auto-pick a model per request; toggle at runtime with /route
-  default: brain        # fallback when the classifier is unsure
+  default: fast         # the 8B workhorse — brain (14B) only when reasoning is needed
 
 agent:
   max_steps: 20         # max tool-use iterations before GT must give a final answer
   auto_approve: false   # if false, GT asks before running commands / writing files
+
+performance:
+  thinking: false       # Qwen3 hidden reasoning mode. OFF = much faster responses;
+                        # toggle per-session with /think when you want deep thought.
+  keep_alive: 30m       # keep models hot in RAM between requests (no reload churn)
+  num_ctx: 8192         # context window; bigger = slower prompt processing
 
 memory:
   auto_learn: true      # after each task, the reviewer extracts a lesson into memory

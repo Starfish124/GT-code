@@ -4,6 +4,7 @@ Run with:  python -m gt   (or start.bat on Windows)
 """
 
 import sys
+import threading
 from pathlib import Path
 
 from prompt_toolkit import PromptSession
@@ -37,6 +38,7 @@ HELP = """\
   /models            list model ids your Ollama + LM Studio actually serve
   /model <role|off>  pin a model role (brain/fast/tiny) or 'off' to auto-route
   /route             toggle smart auto-routing on/off
+  /think             toggle deep thinking (Qwen3 reasoning mode; off = snappy)
   /auto              toggle auto-approve (skip y/n prompts for writes & commands)
   /permissions       show granted permissions; '/permissions clear' revokes all
   /cd <path>         change the workspace directory GT operates in
@@ -99,6 +101,7 @@ class GTShell:
                            f"/cd to change)[/dim]")
         wizard.ensure(self.config, self.llm, self.console, self.session.prompt)
         self._startup_check()
+        self._warmup(self.config.router.get("default", "fast"))
         self.console.print("Type [bold]/help[/bold] for commands, "
                            "[bold]/quit[/bold] to exit.\n")
         while True:
@@ -149,6 +152,15 @@ class GTShell:
                                   if self.perms.auto_approve else ""))
         elif cmd == "/permissions":
             self._permissions(arg)
+        elif cmd == "/think":
+            perf = self.config.performance
+            perf["thinking"] = not perf.get("thinking", False)
+            on = perf["thinking"]
+            self.console.print(
+                f"deep thinking: [bold]{'on' if on else 'off'}[/bold]  "
+                + ("[yellow](slower, more careful — Qwen3 reasons before "
+                   "answering)[/yellow]" if on
+                   else "[dim](snappy default)[/dim]"))
         elif cmd == "/setup":
             wizard.ensure(self.config, self.llm, self.console,
                           self.session.prompt, force=True)
@@ -181,6 +193,26 @@ class GTShell:
         is actually being served (falls back between providers), so GT works
         out of the box on a fresh machine without editing config.yaml."""
         self.config.auto_resolve(self.llm, self.console)
+
+    def _warmup(self, role):
+        """Load the model into RAM in the background while the user types
+        their first prompt — the first answer then starts instantly instead
+        of paying 10-60s of model loading in front of the user."""
+        try:
+            model = self.config.model_for(role)["model"]
+        except KeyError:
+            return
+        self.console.print(f"[dim]· warming up {role} ({model}) in the "
+                           f"background…[/dim]")
+
+        def go():
+            try:
+                self.llm.chat(role, [{"role": "user", "content": "Reply: OK"}],
+                              stream=False, timeout=300)
+            except Exception:
+                pass  # warmup is best-effort; real calls will surface errors
+
+        threading.Thread(target=go, daemon=True).start()
 
     def _permissions(self, arg):
         if arg.strip().lower() == "clear":
@@ -240,6 +272,7 @@ class GTShell:
         self.agent.force_role = arg
         self.console.print(f"pinned to [bold]{arg}[/bold] "
                            f"({self.config.model_for(arg)['model']})")
+        self._warmup(arg)  # start loading it now, not at the first prompt
 
     def _change_dir(self, arg):
         if not arg:

@@ -1,8 +1,16 @@
-"""Smart model routing.
+"""Smart model routing — the speed ladder.
 
-Cheap heuristics first (instant), then a one-word classification from the tiny
-3B model to decide whether a request needs the heavy 'brain' model or can be
-served fast. Falls back to the configured default on any error.
+    tiny (3B)  → routes requests + small talk         (instant)
+    fast (8B)  → the DEFAULT workhorse: everyday      (snappy, stays hot
+                 coding, edits, tool loops             in RAM)
+    brain (14B)→ genuine reasoning only: architecture,
+                 planning, complex multi-step design   (worth the load time)
+
+Sending everything to the 14B is what makes a local agent feel slow: each
+swap can cost 10-60s of model (re)loading before the first token. So the 8B
+does the work by default and the 14B is reserved for requests that actually
+need deep reasoning. Cheap regex heuristics decide instantly; only the
+ambiguous middle costs one word from the 3B classifier.
 """
 
 import re
@@ -13,11 +21,18 @@ _SMALL_TALK = re.compile(
     r"good morning|good night|bye|gm|gn)\b",
     re.I,
 )
-# Strong signals the request is real coding/agentic work -> brain, skip classifier.
+# Signals of everyday coding/agentic work -> fast 8B, skip the classifier.
 _CODE_HINT = re.compile(
     r"\b(code|bug|error|stack ?trace|function|class|refactor|implement|"
     r"compile|test|install|run|file|repo|git|debug|api|regex|script|"
     r"\.py|\.js|\.ts|\.rs|\.go|\.java|\.c|\.cpp|\.sh|traceback)\b",
+    re.I,
+)
+# Signals that real REASONING is needed -> brain 14B is worth its load time.
+_PLAN_HINT = re.compile(
+    r"\b(architect(ure)?|design|plan|blueprint|from scratch|new (app|project|"
+    r"service|platform)|build me|overhaul|rewrite (the )?(whole|entire)|"
+    r"migrate|restructure|complex|strategy|trade-?offs?|compare .* approaches)\b",
     re.I,
 )
 
@@ -28,7 +43,7 @@ class Router:
         self.config = config
         self.console = console
         self.enabled = config.router.get("enabled", True)
-        self.default_role = config.router.get("default", "brain")
+        self.default_role = config.router.get("default", "fast")
 
     def route(self, user_msg) -> str:
         if not self.enabled:
@@ -41,15 +56,17 @@ class Router:
         # --- heuristic fast-paths (no LLM call) ---
         if len(text) < 40 and _SMALL_TALK.search(text):
             return "tiny"
-        if len(text) > 240 or _CODE_HINT.search(text):
+        if _PLAN_HINT.search(text) or len(text) > 600:
             return "brain"
+        if _CODE_HINT.search(text):
+            return "fast"
 
         # --- tiny-model classifier for the ambiguous middle ---
         try:
             label = self._classify(text)
         except Exception:
             return self.default_role
-        return {"simple": "fast", "code": "brain", "complex": "brain"}.get(
+        return {"simple": "fast", "code": "fast", "complex": "brain"}.get(
             label, self.default_role
         )
 

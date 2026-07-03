@@ -155,11 +155,14 @@ check("command_key normalises paths",
       command_key("C:\\Python\\python.exe -m pip install x") == "cmd:python")
 store.unlink(missing_ok=True)
 
-print("\nrouter heuristics (no LLM call)")
+print("\nrouter heuristics (no LLM call) — the 3B/8B/14B speed ladder")
 r = Router(llm=None, config=cfg)
 check("small talk -> tiny", r.route("hi") == "tiny")
-check("code hint -> brain", r.route("fix the bug in main.py") == "brain")
-check("long prompt -> brain", r.route("please " + "explain " * 60) == "brain")
+check("everyday coding -> fast 8B", r.route("fix the bug in main.py") == "fast")
+check("architecture/planning -> brain 14B",
+      r.route("design the architecture for a new app") == "brain")
+check("very long spec -> brain", r.route("please " + "explain " * 100) == "brain")
+check("router default is fast", r.default_role == "fast")
 
 print(f"\n{'='*40}\n{ok} passed, {fail} failed")
 sys.exit(1 if fail else 0)
