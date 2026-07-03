@@ -1,8 +1,8 @@
-# GT-Code — your own local coding agent
+GT-Code your own local coding agent!
 
 A small, self-hosted CLI coding assistant — like Claude Code, but running
 **entirely on your machine** against your local models. No cloud, no API keys,
-no data leaving your PC.
+no data leaving your PC. boom.
 
 On **first launch it evaluates your hardware** (RAM, CPU, GPU/VRAM), tells you
 what this machine can handle, and offers to download the right models — 3B
