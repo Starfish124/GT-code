@@ -14,20 +14,42 @@ echo.
 echo === GT-Code setup ===
 echo.
 
-REM --- find Python ---
-where python >nul 2>nul
-if errorlevel 1 (
-  echo [ERROR] Python is not on your PATH.
-  echo Install Python 3.10+ from https://www.python.org/downloads/
-  echo and CHECK "Add python.exe to PATH" during install.
-  pause
-  exit /b 1
-)
+REM --- find a REAL Python: 3.10+, FULL install with venv support ---
+REM Rejects the Microsoft Store stub and the "embeddable" zip package
+REM (python-3.x-embed-amd64) - those have no venv/pip and cannot run GT.
+set "PYCHECK=import sys,venv;raise SystemExit(0 if sys.version_info>=(3,10) else 1)"
+set "PYCMD=python"
+python -c "%PYCHECK%" >nul 2>nul
+if not errorlevel 1 goto :python_ok
+set "PYCMD=py -3"
+py -3 -c "%PYCHECK%" >nul 2>nul
+if not errorlevel 1 goto :python_ok
+
+echo [ERROR] No usable Python found. GT needs a FULL Python 3.10+ install.
+echo.
+echo What this PC finds when you type "python":
+where python 2>nul
+echo.
+echo Common causes:
+echo   - the "embeddable" zip package - a folder like python-3.x-embed-amd64.
+echo     It has NO venv and NO pip and can never run GT. Remove it from PATH.
+echo   - the Microsoft Store stub that opens the Store instead of Python.
+echo   - a Python older than 3.10.
+echo.
+echo FIX: install the real thing, REOPEN this terminal, re-run setup.bat:
+echo   winget install -e --id Python.Python.3.12
+echo   or python.org/downloads - tick "Add python.exe to PATH"
+pause
+exit /b 1
+
+:python_ok
+for /f "tokens=*" %%V in ('%PYCMD% --version 2^>^&1') do echo Using %%V
+
 
 REM --- venv + deps ---
 if not exist ".venv\Scripts\python.exe" (
   echo Creating virtual environment in .venv ...
-  python -m venv .venv
+  %PYCMD% -m venv .venv
   if errorlevel 1 (
     echo [ERROR] Could not create the virtual environment.
     pause

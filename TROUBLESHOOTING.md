@@ -41,6 +41,47 @@ your projects never need a venv or any setup.
 
 ---
 
+## 0. The Python itself is the wrong kind (very common on fresh PCs)
+
+Symptom during setup:
+
+```
+C:\...\python-3.x-embed-amd64\python.exe: No module named venv
+```
+
+or typing `python` opens the **Microsoft Store**. Three kinds of "Python"
+cannot run GT:
+
+| What you have | How to recognize it | Why it fails |
+|---|---|---|
+| **Embeddable zip package** | a folder like `python-3.14.5-embed-amd64`, often in Downloads | no `venv`, no `pip` — it's for embedding into apps, not for development |
+| **Microsoft Store stub** | typing `python` opens the Store | it's not Python at all |
+| **Python < 3.10** | `python --version` says 3.9 or older | GT uses 3.10+ syntax |
+
+**Fix:**
+
+```powershell
+winget install -e --id Python.Python.3.12
+```
+
+(or the installer from python.org — tick **"Add python.exe to PATH"**).
+Then close **all** terminals, open a new one, and confirm the right Python
+wins:
+
+```powershell
+where.exe python
+python --version
+```
+
+The first `where.exe` line must be the new install — if an embed folder
+still comes first, remove it from your user PATH (Start → "environment
+variables") or simply delete that folder. Then re-run `setup.bat`.
+Setup and `doctor.bat` both detect all three bad-Python cases now and will
+tell you exactly this.
+
+Note: `./setup.sh` is for macOS/Linux only — on Windows PowerShell it just
+opens the file in an editor. Use `setup.bat`.
+
 ## 1. `'gt' is not recognized as an internal or external command` (Windows)
 
 Your terminal can't find the `gt` command on PATH.

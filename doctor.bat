@@ -16,16 +16,26 @@ echo Windows  : %OS%
 echo User     : %USERNAME%
 echo.
 
-REM ---- 1. Python ------------------------------------------------
-where python >nul 2>nul
-if errorlevel 1 (
-  echo [FAIL] 1. Python is not on PATH.
-  echo         FIX: install Python 3.10+ from python.org and tick
-  echo         "Add python.exe to PATH", then reopen this terminal
-  echo         and re-run setup.bat
-  set "FAILED=1"
+REM ---- 1. a REAL Python: 3.10+, full install with venv ----------
+set "PYCHECK=import sys,venv;raise SystemExit(0 if sys.version_info>=(3,10) else 1)"
+set "PYOK="
+python -c "%PYCHECK%" >nul 2>nul
+if not errorlevel 1 set "PYOK=python"
+if not defined PYOK (
+  py -3 -c "%PYCHECK%" >nul 2>nul
+  if not errorlevel 1 set "PYOK=py -3"
+)
+if defined PYOK (
+  for /f "tokens=*" %%V in ('%PYOK% --version 2^>^&1') do echo [ OK ] 1. Usable Python: %%V
 ) else (
-  for /f "tokens=*" %%V in ('python --version 2^>^&1') do echo [ OK ] 1. Python found: %%V
+  echo [FAIL] 1. No USABLE Python. GT needs a full 3.10+ install.
+  echo         The Microsoft Store stub and the "embeddable" zip package
+  echo         do NOT work - they have no venv and no pip.
+  echo         Your PATH currently finds:
+  where python 2>nul
+  echo         FIX: winget install -e --id Python.Python.3.12
+  echo         then REOPEN the terminal and re-run setup.bat
+  set "FAILED=1"
 )
 
 REM ---- 2. venv exists -------------------------------------------
