@@ -228,6 +228,18 @@ tool automatically. Tools that change the machine should call
 
 ## Troubleshooting
 
+**First move, always:** run the doctor from the GT-code folder — it checks
+every link in the launch chain (Python → venv → `gt` command → PATH → Ollama
+→ models) and prints the fix for the first thing that's broken:
+
+```bat
+doctor.bat          ::  macOS/Linux:  ./doctor.sh
+```
+
+The in-depth guide — symptom by symptom, including corporate-laptop PATH
+issues, proxies, and the clean-reinstall procedure — is in
+**[TROUBLESHOOTING.md](TROUBLESHOOTING.md)**. Quick reference:
+
 | Symptom | Fix |
 |--------|-----|
 | `Can't reach ollama` | Ensure Ollama is installed/running (open http://localhost:11434) |

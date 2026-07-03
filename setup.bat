@@ -123,9 +123,9 @@ pushd "%TEMP%"
 call gt --version >nul 2>nul
 if errorlevel 1 (
   echo [WARN] "gt" self-test failed.
-  echo        Try a NEW terminal first. If it still fails, launch GT with:
+  echo        Try a NEW terminal first. If it still fails, run doctor.bat
+  echo        for a step-by-step diagnosis, or launch GT directly with:
   echo          %~dp0start.bat
-  echo        and report this with a screenshot.
 ) else (
   echo Self-test OK: "gt" works from any folder.
 )
