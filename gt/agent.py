@@ -27,19 +27,45 @@ from .llm import LLMError
 # Matches ```json { ... } ``` (and bare ``` ... ```) fenced blocks.
 _FENCE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.S)
 
+_DECODER = json.JSONDecoder()
+
+
+def _scan_objects(text):
+    """Yield every top-level {...} JSON object found anywhere in the text.
+
+    Small models often emit several calls run together ('{...}; {...}') with
+    no fence — raw_decode picks each one out of the surrounding noise.
+    """
+    idx = 0
+    while True:
+        start = text.find("{", idx)
+        if start == -1:
+            return
+        try:
+            obj, consumed = _DECODER.raw_decode(text[start:])
+        except ValueError:
+            idx = start + 1
+            continue
+        yield obj
+        idx = start + consumed
+
 
 def extract_tool_call(text):
-    """Return the last valid {"tool": ...} object in the text, or None."""
-    candidates = list(_FENCE.findall(text))
-    if not candidates:
-        stripped = text.strip()
-        if stripped.startswith("{") and '"tool"' in stripped:
-            candidates = [stripped]
-    for block in reversed(candidates):
+    """Return one valid {"tool": ...} object from the text, or None.
+
+    Fenced blocks win (last one — models think first, then act). Otherwise
+    scan for bare JSON objects and take the FIRST tool call, so a spray of
+    several calls executes sequentially, one per agent step.
+    """
+    for block in reversed(_FENCE.findall(text)):
         try:
             obj = json.loads(block)
         except Exception:
             continue
+        if isinstance(obj, dict) and "tool" in obj:
+            obj.setdefault("args", {})
+            return obj
+    for obj in _scan_objects(text):
         if isinstance(obj, dict) and "tool" in obj:
             obj.setdefault("args", {})
             return obj
