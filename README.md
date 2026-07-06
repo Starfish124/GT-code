@@ -1,8 +1,8 @@
 GT-Code your own local coding agent! (please scroll lower to see trouble shooting)
 
-A small, self-hosted CLI coding assistant — like Claude Code, but running
+A small, self-hosted CLI coding assistant, like Claude Code, but running
 **entirely on your machine** with your local models. No cloud, no API keys,
-no data leaving your PC. with a 3b, 8b and 14b parameter models
+no data leaving your PC. with a 3b, 8b and 14b parameter models (input needed for other models)
 
 On **first launch it evaluates your hardware** (RAM, CPU, GPU/VRAM), tells you
 what this machine can handle, and offers to download the right models — 3B
