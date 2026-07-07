@@ -47,8 +47,11 @@ class ReadFile(Tool):
 
 class WriteFile(Tool):
     name = "write_file"
-    description = "Create or overwrite a file with the given content."
-    args = {"path": "File path.", "content": "Full text to write."}
+    description = ("Create or overwrite a file. For more than a couple of "
+                   "lines, omit 'content' and put the raw file body in a "
+                   "second fenced code block right after the json block.")
+    args = {"path": "File path.",
+            "content": "Full text to write (or use a content block instead)."}
     changes_system = True
 
     def run(self, args, ctx):

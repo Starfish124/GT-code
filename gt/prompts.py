@@ -42,13 +42,28 @@ nothing else:
 
 Rules:
 - Emit exactly one tool call at a time, then wait for the result before the next.
-- The json block must be the ONLY thing in that message when calling a tool.
+- The json block must be the ONLY thing in that message when calling a tool \
+(one exception: write_file's content block, below).
+- write_file: for anything longer than a couple of lines, OMIT "content" \
+from the json and put the raw file body in a SECOND fenced block right after:
+
+```json
+{{"tool": "write_file", "args": {{"path": "app/main.py"}}}}
+```
+```python
+# the full file text goes here — no JSON escaping needed
+```
+
 - To edit a file, read_file it first so your `find` text matches exactly.
 - When you are finished, reply in normal prose with NO json block — that final \
 message is what the user sees as your answer.
 - Keep going with tools until the task is actually done; don't stop to ask \
 permission for routine steps (the tools handle approval themselves). Only \
 ask_user for genuine decisions the user must make.
+- NEVER end a reply by announcing what you are about to do ("I'll now create \
+the frontend…") or by asking whether to proceed — either make the tool call, \
+or report what you actually DID. Once the user has confirmed the plan (or \
+said "go ahead"), execute ALL of it in one go without further check-ins.
 
 # Running commands
 - Every run_command starts fresh in the workspace root: `cd` does NOT carry \

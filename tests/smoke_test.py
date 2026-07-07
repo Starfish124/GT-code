@@ -285,6 +285,118 @@ check("nudge forces a third model call after the give-up prose",
 check("the post-nudge reply becomes the final answer",
       answer == "The file does not exist — nothing to read.")
 
+print("\nstall detection: announcements and echoes don't end the turn")
+from gt.agent import _INTENT
+check("intent prose detected",
+      bool(_INTENT.search("I'll proceed with setting up the React frontend. "
+                          "Let me create the project structure.")))
+check("'Let me now create' detected", bool(_INTENT.search("Let me now create main.py")))
+check("closing courtesy 'Let me know…' is NOT intent",
+      not _INTENT.search("All done — the app is running on port 8000. "
+                         "Let me know if you need anything else."))
+check("plain summary is NOT intent",
+      not _INTENT.search("The server is running and serving the frontend."))
+
+class _AnnounceLLM:
+    last_metrics = None
+    def __init__(self):
+        self.calls = 0
+    def chat(self, role, messages, **kw):
+        self.calls += 1
+        reply = {1: "I'll proceed with creating the files. Let me create them now.",
+                 2: '```json\n{"tool":"list_dir","args":{"path":"."}}\n```',
+                 3: "Done — the folder is listed."}[self.calls]
+        if kw.get("on_token"):
+            kw["on_token"](reply)
+        return reply
+_aagent = Agent(llm=_AnnounceLLM(), config=cfg, memory=_Stub(), router=_Stub(),
+                console=_quiet, improver=_Stub(),
+                approve=lambda *a, **k: True, ask=None)
+check("announcement is nudged into acting (3 calls, real answer)",
+      _aagent.run("build it") == "Done — the folder is listed."
+      and _aagent.llm.calls == 3)
+
+class _EchoLLM:
+    last_metrics = None
+    def __init__(self):
+        self.calls = 0
+    def chat(self, role, messages, **kw):
+        self.calls += 1
+        reply = {1: "The frontend is pending and the setup awaits.",
+                 2: '```json\n{"tool":"list_dir","args":{"path":"."}}\n```',
+                 3: "Finished the setup for real this time."}[self.calls]
+        if kw.get("on_token"):
+            kw["on_token"](reply)
+        return reply
+_eagent = Agent(llm=_EchoLLM(), config=cfg, memory=_Stub(), router=_Stub(),
+                console=_quiet, improver=_Stub(),
+                approve=lambda *a, **k: True, ask=None)
+_eagent.history = [
+    {"role": "user", "content": "build it"},
+    {"role": "assistant",
+     "content": "The frontend is pending and the setup awaits."
+                "\n\n[actions taken this turn]\n- list_dir(.) -> ok"},
+]
+check("verbatim repeat of last answer is nudged into acting",
+      _eagent.run("yes") == "Finished the setup for real this time.")
+
+print("\nwrite_file content-block protocol (no JSON-escaping of file bodies)")
+from gt.agent import attach_content_block
+_reply = ('```json\n{"tool": "write_file", "args": {"path": "app.py"}}\n```\n'
+          '```python\nprint("a")\nprint(\'b\')\n# no escaping needed\n```')
+_call = extract_tool_call(_reply)
+attach_content_block(_call, _reply)
+check("content lifted from the second fence",
+      _call["args"]["content"] == 'print("a")\nprint(\'b\')\n# no escaping needed\n')
+_call2 = {"tool": "write_file", "args": {"path": "x", "content": "explicit"}}
+attach_content_block(_call2, _reply)
+check("explicit content is never overridden", _call2["args"]["content"] == "explicit")
+_call3 = {"tool": "run_command", "args": {"command": "ls"}}
+attach_content_block(_call3, _reply)
+check("only write_file gets a content block", "content" not in _call3["args"])
+
+class _FenceLLM:
+    last_metrics = None
+    def __init__(self):
+        self.calls = 0
+    def chat(self, role, messages, **kw):
+        self.calls += 1
+        reply = {1: ('```json\n{"tool": "write_file", "args": '
+                     '{"path": "fenced.txt"}}\n```\n'
+                     '```\nhello from the fence\n```'),
+                 2: "Wrote the file."}[self.calls]
+        if kw.get("on_token"):
+            kw["on_token"](reply)
+        return reply
+_fagent = Agent(llm=_FenceLLM(), config=cfg, memory=_Stub(), router=_Stub(),
+                console=_quiet, improver=_Stub(),
+                approve=lambda *a, **k: True, ask=None)
+_fagent.cwd = tmp
+check("agent loop writes the fenced content to disk",
+      _fagent.run("write it") == "Wrote the file."
+      and (tmp / "fenced.txt").read_text(encoding="utf-8")
+      == "hello from the fence\n")
+(tmp / "fenced.txt").unlink(missing_ok=True)
+
+class _BadJsonLLM:
+    last_metrics = None
+    def __init__(self):
+        self.calls = 0
+    def chat(self, role, messages, **kw):
+        self.calls += 1
+        reply = {1: '```json\n{"tool": "write_file", "args": {"path": "a.txt", '
+                    '"content": "line1\\nline2',      # truncated mid-string
+                 2: '```json\n{"tool":"list_dir","args":{"path":"."}}\n```',
+                 3: "Wrote the file after fixing my JSON."}[self.calls]
+        if kw.get("on_token"):
+            kw["on_token"](reply)
+        return reply
+_bagent = Agent(llm=_BadJsonLLM(), config=cfg, memory=_Stub(), router=_Stub(),
+                console=_quiet, improver=_Stub(),
+                approve=lambda *a, **k: True, ask=None)
+check("truncated tool-call JSON is nudged, not returned as the answer",
+      _bagent.run("write a file") == "Wrote the file after fixing my JSON.")
+
 print("\nrun_command survives non-ASCII output (Windows cp1252 crash)")
 r = RunCommand().run(
     {"command": f"{py} -c \"print('⚠ npm ✓ émoji 🎉')\""}, run_ctx)

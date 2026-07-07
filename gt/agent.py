@@ -72,6 +72,30 @@ def extract_tool_call(text):
     return None
 
 
+# Any fenced block (```lang\n…```) — used to lift raw write_file content.
+_ANYFENCE = re.compile(r"```[^\n`]*\n(.*?)```", re.S)
+
+
+def attach_content_block(call, reply):
+    """Let write_file take its content as a raw fenced block after the json.
+
+    Escaping a whole code file into a JSON string is the single most fragile
+    thing the prompt protocol asks of a small model — long contents routinely
+    arrive with unterminated strings or bad escapes. With this, the json part
+    stays tiny ({"path": …}) and the file body rides in a second fence with
+    no escaping at all.
+    """
+    if call.get("tool") != "write_file":
+        return call
+    args = call.setdefault("args", {})
+    if args.get("content"):
+        return call
+    blocks = [b for b in _ANYFENCE.findall(reply) if '"tool"' not in b]
+    if blocks:
+        args["content"] = blocks[-1]
+    return call
+
+
 # The one arg per tool that identifies WHAT it acted on, for the turn digest.
 _DIGEST_ARGS = ("command", "path", "question", "query", "url", "id")
 
@@ -97,6 +121,39 @@ def digest_line(name, args, result):
     failed = (first.startswith(("ERROR", "DENIED"))
               or bool(re.match(r"exit code: (?!0\b)", first)))
     return f"- {'FAILED ' if failed else ''}{name}({arg}) -> {first}"
+
+
+# 'I'll now create the frontend…' with no tool call is an announcement, not
+# an answer. Requires an action verb after the intent phrase so that a normal
+# closing line like 'Let me know if you need anything' never matches.
+_INTENT = re.compile(
+    r"(?i)\b(?:i'?ll|i will|let'?s|let me|i'?m going to|i am going to|"
+    r"now,? i(?:'ll| will)?|proceeding to)\s+"
+    r"(?:now\s+|first\s+|then\s+|just\s+)*"
+    r"(?:create|proceed|start|set(?:ting)? up|build|write|install|make|add|"
+    r"update|run|fix|implement|generate|configure|move|continue|go ahead)")
+
+# What to feed back for each kind of stall, instead of ending the turn.
+_NUDGE = {
+    "badjson": ("[system] That looked like a tool call but it was NOT valid "
+                "JSON — usually an unterminated string or missing closing "
+                "braces on a long file. Re-send it as ONE complete ```json "
+                "block. For write_file, OMIT \"content\" from the json and "
+                "put the raw file body in a second fenced block right after "
+                "it — no JSON escaping needed."),
+    "failed": ("[system] Your last tool call FAILED and you stopped without "
+               "finishing. Diagnose and fix it now — reply with your next "
+               "tool call. Give a final prose answer only when the task is "
+               "done or truly impossible."),
+    "intent": ("[system] You ANNOUNCED what you will do but did not do it. "
+               "Do it now — reply with the tool call, in this same turn. "
+               "Never end a reply with 'I'll now…' or ask whether to "
+               "proceed: the user already told you to. If a genuine "
+               "decision is needed, use the ask_user tool."),
+    "echo":   ("[system] You are repeating your previous message without "
+               "acting. Stop announcing. Make the next tool call now, or "
+               "use ask_user if you are blocked on a real decision."),
+}
 
 
 class Agent:
@@ -166,7 +223,7 @@ class Agent:
         trace = []                 # digest of tool steps, persisted to history
         compact_warned = False
         interrupted = False
-        nudged = False             # one retry-nudge per turn when GT gives up
+        nudged = set()             # stall kinds already nudged this turn
         try:
             for step in range(1, self.max_steps + 1):
                 if self._fit_context(messages) and not compact_warned:
@@ -187,26 +244,26 @@ class Agent:
 
                 messages.append({"role": "assistant", "content": reply})
                 call = extract_tool_call(reply)
+                if call:
+                    attach_content_block(call, reply)
 
                 if not call:
-                    # Small models often stop with 'Let me try again…' prose
-                    # right after a failed step — that is a plan, not an
-                    # answer. Nudge once to keep going instead of ending the
-                    # turn (and hallucinating success on the next one).
-                    if (trace and trace[-1].startswith("- FAILED")
-                            and not nudged and step < self.max_steps):
-                        nudged = True
-                        self.console.print("[dim]· last step failed — nudging "
-                                           "GT to fix it and continue[/dim]")
-                        messages.append({
-                            "role": "user",
-                            "content": ("[system] Your last tool call FAILED "
-                                        "and you stopped without finishing. "
-                                        "Diagnose and fix it now — reply with "
-                                        "your next tool call. Give a final "
-                                        "prose answer only when the task is "
-                                        "done or truly impossible."),
-                        })
+                    # Small models stall in three recognizable ways instead
+                    # of finishing: give-up prose after a FAILED step,
+                    # announcing work without doing it ('I'll now create…'),
+                    # or repeating their previous answer verbatim when the
+                    # user says 'yes'/'go ahead'. All three would end the
+                    # turn; nudge (max twice per turn) to act instead.
+                    # Each stall kind is nudged at most once per turn: if the
+                    # model STILL answers prose after the nudge, that's its
+                    # answer (e.g. declaring the task impossible).
+                    stall = self._stall_reason(reply.strip(), trace)
+                    if stall and stall not in nudged and step < self.max_steps:
+                        nudged.add(stall)
+                        self.console.print(f"[dim]· GT stalled ({stall}) — "
+                                           f"nudging it to act[/dim]")
+                        messages.append({"role": "user",
+                                         "content": _NUDGE[stall]})
                         continue
                     final_answer = reply.strip()
                     break
@@ -224,8 +281,10 @@ class Agent:
                 })
             else:
                 self.console.print(
-                    f"[yellow]Reached max_steps ({self.max_steps}); "
-                    f"stopping.[/yellow]"
+                    f"[yellow]Reached the step limit ({self.max_steps}) — "
+                    f"stopping here. {len(trace)} tool step(s) were taken; "
+                    f"they are kept, so say 'continue' to pick up where GT "
+                    f"left off.[/yellow]"
                 )
         except KeyboardInterrupt:
             # Don't lose the turn: whatever was already done stays in history
@@ -266,6 +325,32 @@ class Agent:
         self._seen_memory.clear()
 
     # ---- internals ----------------------------------------------------------
+
+    def _stall_reason(self, text, trace):
+        """Classify a no-tool-call reply that shouldn't end the turn.
+
+        Returns 'badjson' | 'failed' | 'intent' | 'echo' | None. None means
+        the reply is a legitimate final answer.
+        """
+        # A reply that contains '"tool"' but parsed to no call is an
+        # ATTEMPTED tool call with broken JSON (models truncate long
+        # write_file contents) — without this it becomes the 'final answer'
+        # as a raw JSON blob.
+        if '"tool"' in text and "{" in text:
+            return "badjson"
+        if trace and trace[-1].startswith("- FAILED"):
+            return "failed"
+        # Verbatim repeat of the previous turn's answer — the 'yes' → same
+        # message → 'yes' lock. Compare against the prose part only (the
+        # stored history entry may carry an [actions taken] digest).
+        if self.history and self.history[-1]["role"] == "assistant":
+            prev = self.history[-1]["content"].split(
+                "\n\n[actions taken this turn]")[0].strip()
+            if prev and text == prev:
+                return "echo"
+        if _INTENT.search(text):
+            return "intent"
+        return None
 
     def _fit_context(self, messages, keep_recent=2):
         """Keep the message list inside the model's context window.
