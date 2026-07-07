@@ -14,6 +14,7 @@ gt/office.py
 gt/permissions.py
 gt/prompts.py
 gt/router.py
+gt/skills.py
 gt/tools.py
 gt/ui.py
 gt/wizard.py

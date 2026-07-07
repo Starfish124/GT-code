@@ -51,6 +51,9 @@ router:
 agent:
   max_steps: 20         # max tool-use iterations before GT must give a final answer
   auto_approve: false   # if false, GT asks before running commands / writing files
+  command_timeout: 300  # default seconds before run_command kills a command; the
+                        # model can raise it per call (installs/builds) up to 1800.
+                        # Dev servers should use background:true, not a big timeout.
 
 performance:
   thinking: false       # Qwen3 hidden reasoning mode. OFF = much faster responses;

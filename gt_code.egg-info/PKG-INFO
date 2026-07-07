@@ -10,15 +10,16 @@ Requires-Dist: numpy>=1.26
 Requires-Dist: rich>=13.7
 Requires-Dist: prompt_toolkit>=3.0
 Requires-Dist: beautifulsoup4>=4.12
-Requires-Dist: openpyxl>=3.1
-Requires-Dist: python-pptx>=0.6.23
-Requires-Dist: python-docx>=1.1
+Provides-Extra: docs
+Requires-Dist: openpyxl>=3.1; extra == "docs"
+Requires-Dist: python-pptx>=0.6.23; extra == "docs"
+Requires-Dist: python-docx>=1.1; extra == "docs"
 
-# GT-Code — your own local coding agent
+GT-Code your own local coding agent! (please scroll lower to see trouble shooting)
 
 A small, self-hosted CLI coding assistant — like Claude Code, but running
-**entirely on your machine** against your local models. No cloud, no API keys,
-no data leaving your PC.
+**entirely on your machine** with your local models. No cloud, no API keys,
+no data leaving your PC. with a 3b, 8b and 14b parameter models
 
 On **first launch it evaluates your hardware** (RAM, CPU, GPU/VRAM), tells you
 what this machine can handle, and offers to download the right models — 3B
@@ -67,14 +68,20 @@ cd GT-code
 setup.bat          ::  macOS/Linux:  ./setup.sh
 ```
 
-The script creates the `.venv`, installs dependencies, **installs Ollama** if
+The script installs GT-Code into **its own `.venv` inside the GT-code folder**
+(one environment for GT itself — never one per project), **installs Ollama** if
 missing (winget on Windows, brew/curl elsewhere), pulls the tiny baseline
-models (~2.3 GB), and installs a global **`gt` command**. Then:
+models (~2.3 GB), installs a global **`gt` command**, and self-tests that the
+command works from a different folder. Then:
 
 ```bat
 cd C:\any\project
 gt
 ```
+
+GT always runs from its own environment and **operates on whatever folder you
+launch it from** — your projects need no venv, no setup, nothing. `gt <path>`
+opens a specific folder; `gt --version` checks the install.
 
 **First launch runs the setup wizard**: it probes your hardware, shows a
 verdict ("16 GB RAM comfortably fits a 14B model…"), and asks before
@@ -128,6 +135,8 @@ Destructive-looking commands (`rm -rf`, `format`, `del /s`, forced pushes…)
 | `/models` | Show the exact model ids Ollama + LM Studio serve |
 | `/model <role\|off>` | Pin a model (`brain`/`fast`/`tiny`) or `off` to auto-route |
 | `/route` | Toggle smart auto-routing |
+| `/think` | Toggle deep-thinking mode (slower, more careful; off by default) |
+| `/skills` | List the expert playbooks GT injects per request |
 | `/auto` | Toggle auto-approve (dangerous commands still prompt) |
 | `/permissions` | List standing grants; `/permissions clear` revokes all |
 | `/cd <path>` | Change the working directory GT operates in |
@@ -140,6 +149,81 @@ Destructive-looking commands (`rm -rf`, `format`, `del /s`, forced pushes…)
 | `/quit` | Exit |
 
 ---
+
+## Skills — embedded expertise the local models don't have
+
+Local models can execute, but they arrive with no *taste*: they've never
+seen what a consultant-grade spreadsheet or a designed landing page looks
+like. GT ships with a curated **skills library** (`skills/*.md`) — expert
+playbooks written once, injected automatically:
+
+| Playbook | Kicks in when you ask for… |
+|---|---|
+| `excel` | spreadsheets — summary sheet first, headers with units, totals, assumptions |
+| `powerpoint` | decks — takeaway titles, one idea per slide, speaker notes |
+| `word-docs` | reports — executive summary, verb-led recommendations |
+| `frontend` | HTML/UI — design system, spacing scale, hover states, single-file rule |
+| `backend` | APIs — REST conventions, validation at the edge, one error shape |
+| `code-quality` | any code — naming, small functions, verify-before-done |
+| `debugging` | bugs — reproduce → read the error → one hypothesis at a time |
+| `project-setup` | new projects — scaffold, README, git, prove hello-world runs |
+
+Per request GT matches trigger keywords and injects at most 2 playbooks
+(~1-2k tokens) into the model's context — you'll see
+`· playbooks: excel` before it starts. `/skills` lists them all.
+
+**Why playbooks and not gigabytes of docs:** an 8K context window means the
+model can only *see* a few thousand tokens of guidance at once. Two sharp,
+curated pages at exactly the right moment beat 3 GB of retrieved
+documentation fragments. For big reference corpora you control, that's what
+`/index` (RAG) is for — index MDN, your style guide, or a framework's docs
+and GT recalls the relevant chunks.
+
+**Add your own:** drop a `.md` into `~/.gt/skills/` (or `skills/` in the
+repo) with the same front matter (`name`, `triggers`, `priority`) — same-name
+files in `~/.gt/skills/` override the shipped ones. Team-wide skills are just
+files in git.
+
+## Performance — why GT feels snappy (and what the numbers mean)
+
+Local agents usually feel slow for reasons that have nothing to do with model
+quality. GT attacks all of them:
+
+**The speed ladder.** The 3B routes and handles small talk (instant), the
+**8B is the workhorse** for everyday coding and stays hot in RAM, and the 14B
+is reserved for what actually needs deep reasoning — architecture, planning,
+complex design. Sending everything to the biggest model is what kills local
+agents: every model swap can cost 10–60 s of loading before the first token.
+
+**Hidden "thinking" off by default.** Qwen3 models silently generate hundreds
+of internal reasoning tokens before answering — measured on the same question:
+13 tokens without thinking vs 134 with. GT disables it by default and gives
+you `/think` to turn it back on when you *want* slow-and-careful.
+
+**Models stay loaded.** GT uses Ollama's native API with `keep_alive: 30m`,
+so a model loads once and stays hot. At startup (and whenever you `/model`
+pin), GT pre-warms the model **in the background while you type your first
+prompt**.
+
+**Nothing blocks you.** Lesson-extraction (the self-improve loop) runs on a
+background thread after your answer is already delivered. Oversized tool
+outputs are trimmed before re-entering context so later steps don't pay
+ever-growing prompt-processing costs.
+
+**You see where time goes.** While waiting you get a live counter
+(`⠹ waiting for fast (qwen3:8b) — 3.2s`), and after every response a real
+measurement straight from Ollama:
+
+```
+⏱ model load 8.2s · prompt 1.1s (1312 tok) · 34 tok/s × 412 tok · total 21.3s
+```
+
+If `model load` shows up, that was a one-time cost (model got evicted or
+first use). If `prompt` dominates, the context is big. If tok/s is low, the
+model is too big for the hardware — `/setup` re-evaluates the tier.
+
+Tuning knobs in `config.yaml` under `performance:`: `thinking`, `keep_alive`,
+`num_ctx`.
 
 ## How it works (the interesting part)
 
@@ -238,12 +322,27 @@ tool automatically. Tools that change the machine should call
 
 ## Troubleshooting
 
+**First move, always:** run the doctor from the GT-code folder — it checks
+every link in the launch chain (Python → venv → `gt` command → PATH → Ollama
+→ models) and prints the fix for the first thing that's broken:
+
+```bat
+doctor.bat          ::  macOS/Linux:  ./doctor.sh
+```
+
+The in-depth guide — symptom by symptom, including corporate-laptop PATH
+issues, proxies, and the clean-reinstall procedure — is in
+**[TROUBLESHOOTING.md](TROUBLESHOOTING.md)**. Quick reference:
+
 | Symptom | Fix |
 |--------|-----|
 | `Can't reach ollama` | Ensure Ollama is installed/running (open http://localhost:11434) |
 | Wizard says Ollama missing | Install it (`winget install Ollama.Ollama` / `brew install ollama`), then `/setup` |
 | `model not found, try pulling it` | `/setup` again, or `ollama pull` the model it names |
 | `'python' is not recognized` | Reinstall Python with **Add to PATH**, or use `py -3` |
+| `No module named gt` when typing `gt` | Your install predates v0.2 — `git pull` in the GT-code folder and re-run `setup.bat` / `./setup.sh` (it now pip-installs GT into its venv and self-tests from another folder) |
+| `'gt' is not recognized...` (Windows) | `git pull` + re-run `setup.bat`: it now installs the command to `%USERPROFILE%\.gt\bin` and adds that to your user PATH itself (managed/corporate laptops often don't have the WindowsApps folder on PATH). Then **open a new terminal**. Still stuck? `start.bat` in the GT-code folder always works |
+| `gt` opens the wrong folder | GT works on the folder you run it from; use `gt <path>` or `/cd` inside GT |
 | First reply from the 14B is slow | Normal — Ollama loads it into RAM/VRAM on first call |
 | Router feels laggy | `/route` off, or `/model brain` to pin the big model |
 | `web search failed (offline?)` | No internet, or set `web.enabled: false` to hide the web tools |

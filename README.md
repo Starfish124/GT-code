@@ -229,7 +229,19 @@ everything and always asks.
 **Clarify → plan → execute → verify** (`gt/prompts.py` + the `ask_user` tool).
 The system prompt teaches the workflow; `ask_user` lets the model stop
 mid-task and ask *you* a question — that's how it clarifies requirements and
-confirms its architecture plan before writing code.
+confirms its architecture plan before writing code. It's budgeted: at most 3
+questions per task, and the prompt tells the model to bundle what it needs
+into one question and pick sensible defaults (ports, file names) itself.
+
+**Shell that survives real dev work** (`gt/tools.py`). `run_command` takes
+optional `cwd` (because `cd` never persists between commands), `timeout`
+(default 300 s, raisable per call for big installs — on timeout the process
+*tree* is killed and partial output is returned), and `background: true` for
+dev servers and watchers, which never exit and would otherwise always time
+out. Background processes log to `data/logs/`, are inspected with
+`check_process`, stopped with `stop_process`, and killed on GT exit. Every
+command runs with stdin closed and `CI=1` + `npm_config_yes` so CLIs go
+non-interactive instead of hanging on an invisible prompt.
 
 **Routing** (`gt/router.py`). Cheap heuristics first (small talk → `tiny`,
 code signals → `brain`); only ambiguous requests cost a one-word
@@ -329,6 +341,7 @@ issues, proxies, and the clean-reinstall procedure — is in
 | First reply from the 14B is slow | Normal — Ollama loads it into RAM/VRAM on first call |
 | Router feels laggy | `/route` off, or `/model brain` to pin the big model |
 | `web search failed (offline?)` | No internet, or set `web.enabled: false` to hide the web tools |
+| `command killed after 300s` | Long install/build: GT can pass a bigger `timeout`; a dev server should run with `background: true` instead. Default lives in `agent.command_timeout` |
 | Office tool says a package is missing | `pip install openpyxl python-pptx python-docx` in the `.venv` (or re-run setup) |
 
 ---
@@ -363,7 +376,7 @@ GT-code/
     router.py          picks a model per request
     agent.py           the agentic tool loop
     base.py            Tool base class + tool-call context
-    tools.py           file / shell / search / web / ask_user / recall tools
+    tools.py           file / shell (+ background processes) / search / web / ask_user / recall
     office.py          create_excel / create_powerpoint / create_word
     memory.py          sqlite + nomic-embed vector store
     improve.py         self-improving lesson extractor

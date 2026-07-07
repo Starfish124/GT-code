@@ -58,7 +58,9 @@ check("long text splits into overlapping chunks", len(chunks) == 3)
 check("empty text -> no chunks", chunk_text("") == [])
 
 print("\ntool registry + docs")
-check("all 13 tools registered", len(REGISTRY) == 13)
+check("all 15 tools registered", len(REGISTRY) == 15)
+check("process tools registered",
+      {"check_process", "stop_process"} <= set(REGISTRY))
 check("tool_docs mentions run_command", "run_command" in tool_docs())
 check("tool_docs mentions web_search", "web_search" in tool_docs())
 check("office tools registered",
@@ -114,7 +116,57 @@ check("ask_user handles no-input mode",
       "ERROR" in AskUser().run({"question": "x"},
                                Ctx(cwd=tmp, memory=None,
                                    approve=lambda *_, **__: True, config=cfg)))
+for _ in range(2):  # 2 more asks -> budget of 3 used up
+    AskUser().run({"question": "another?"}, ask_ctx)
+check("ask_user cuts off after 3 questions per task",
+      "used all 3 questions" in AskUser().run({"question": "a 4th?"}, ask_ctx))
+
+print("\nrun_command: cwd / timeout / background")
+import sys as _sys
+from gt.tools import RunCommand, CheckProcess, StopProcess, BACKGROUND
+run_ctx = Ctx(cwd=tmp, memory=None, approve=lambda *_, **__: True, config=cfg)
+check("run_command declares cwd/timeout/background args",
+      {"command", "cwd", "timeout", "background"} <= set(RunCommand().args))
+sub = tmp / "subdir"
+sub.mkdir(exist_ok=True)
+py = f'"{_sys.executable}"'
+r = RunCommand().run(
+    {"command": f"{py} -c \"import os; print(os.getcwd())\"", "cwd": "subdir"},
+    run_ctx)
+check("cwd arg runs the command in the subfolder", "subdir" in r)
+check("missing cwd is a clear error",
+      "cwd does not exist" in RunCommand().run(
+          {"command": "echo hi", "cwd": "nope"}, run_ctx))
+r = RunCommand().run(
+    {"command": f"{py} -u -c \"print('start'); import time; time.sleep(60)\"",
+     "timeout": 5}, run_ctx)
+check("timeout kills the command and says so", "killed after 5s" in r)
+check("timeout returns partial output", "start" in r)
+check("timeout suggests background mode", "background" in r)
+r = RunCommand().run(
+    {"command": f"{py} -u -c \"print('serving'); import time; time.sleep(60)\"",
+     "background": True}, run_ctx)
+check("background start returns a process id", "started background process" in r)
+check("background start captures early output", "serving" in r)
+pid = int(r.split("background process ")[1].split(":")[0])
+check("check_process reports RUNNING",
+      "RUNNING" in CheckProcess().run({"id": pid}, run_ctx))
+check("stop_process stops it", "OK: stopped" in StopProcess().run({"id": pid}, run_ctx))
+import time as _time
+_time.sleep(0.5)
+check("check_process reports EXITED after stop",
+      "EXITED" in CheckProcess().run({"id": pid}, run_ctx))
+check("unknown process id is a clear error",
+      "ERROR" in CheckProcess().run({"id": 999}, run_ctx))
+r = RunCommand().run(
+    {"command": f"{py} -c \"import sys; sys.exit(3)\"", "background": True},
+    run_ctx)
+check("instant crash in background is reported", "exited immediately" in r)
+
 # cleanup
+for f in sub.iterdir():
+    f.unlink()
+sub.rmdir()
 (tmp / "hello.txt").unlink(missing_ok=True)
 tmp.rmdir()
 

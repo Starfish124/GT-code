@@ -5,7 +5,12 @@ teach the model how to call it. Tools that change the machine (write/edit/run)
 go through ctx.approve() so the user stays in control unless auto-approve is on.
 """
 
+import atexit
+import os
+import re
+import signal
 import subprocess
+import time
 from pathlib import Path
 
 from .base import Ctx, Tool  # noqa: F401  (re-exported; agent.py imports Ctx from here)
@@ -157,44 +162,221 @@ class SearchFiles(Tool):
 
 
 # --------------------------------------------------------------------------- #
-#  Shell tool
+#  Shell tools
 # --------------------------------------------------------------------------- #
+
+def _shell_env() -> dict:
+    """Environment that keeps CLIs from waiting on a hidden interactive prompt.
+
+    stdin is closed for every command, so anything that asks a question would
+    hang until the timeout. CI=1 + npm_config_yes flip npm/npx/vite/CRA and
+    most modern CLIs into non-interactive mode instead.
+    """
+    env = os.environ.copy()
+    env.setdefault("CI", "1")
+    env.setdefault("npm_config_yes", "true")
+    env.setdefault("GIT_TERMINAL_PROMPT", "0")
+    return env
+
+
+def _kill_tree(proc: subprocess.Popen):
+    """Kill a shell=True command AND its children (npm spawns node spawns...)."""
+    try:
+        if os.name == "nt":
+            subprocess.run(f"taskkill /F /T /PID {proc.pid}",
+                           shell=True, capture_output=True)
+        else:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
+def _popen_kwargs():
+    """start_new_session gives us a process group to kill on POSIX."""
+    return {"start_new_session": True} if os.name != "nt" else {}
+
+
+class _BackgroundProcs:
+    """Registry of processes GT started with background=true (dev servers)."""
+
+    def __init__(self):
+        self.procs = {}   # id -> {"proc", "log", "command"}
+        self.next_id = 1
+        atexit.register(self.kill_all)
+
+    def start(self, command: str, cwd: Path, log_dir: Path):
+        log_dir.mkdir(parents=True, exist_ok=True)
+        pid = self.next_id
+        self.next_id += 1
+        log = log_dir / f"proc-{pid}.log"
+        handle = open(log, "w", encoding="utf-8", errors="replace")
+        proc = subprocess.Popen(
+            command, shell=True, cwd=str(cwd),
+            stdout=handle, stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL, env=_shell_env(), **_popen_kwargs(),
+        )
+        self.procs[pid] = {"proc": proc, "log": log, "command": command}
+        return pid, proc, log
+
+    def get(self, pid):
+        return self.procs.get(pid)
+
+    def kill_all(self):
+        for entry in self.procs.values():
+            if entry["proc"].poll() is None:
+                _kill_tree(entry["proc"])
+
+
+BACKGROUND = _BackgroundProcs()
+
+
+_ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def _log_tail(log: Path, chars: int = 3000) -> str:
+    try:
+        text = log.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return ""
+    return _ANSI.sub("", text)[-chars:].strip()
+
 
 class RunCommand(Tool):
     name = "run_command"
-    description = ("Run a shell command in the workspace and return its output. "
-                   "On Windows this is cmd; on macOS/Linux it's the default shell.")
-    args = {"command": "The command line to execute."}
+    description = ("Run a shell command and return its output. On Windows this "
+                   "is cmd; on macOS/Linux the default shell. Each call starts "
+                   "fresh in the workspace root — `cd` does NOT persist; use "
+                   "the cwd arg instead. Commands cannot answer interactive "
+                   "prompts, so always pass non-interactive flags (-y, --yes).")
+    args = {
+        "command": "The command line to execute.",
+        "cwd": "Optional: directory to run in (relative to the workspace).",
+        "timeout": "Optional: seconds before the command is killed "
+                   "(default 300; raise it for installs/builds, max 1800).",
+        "background": "Optional: true to start a long-lived process (dev "
+                      "server, watcher) and return immediately. Inspect it "
+                      "later with check_process / stop_process.",
+    }
     changes_system = True
 
     def run(self, args, ctx):
-        command = args.get("command", "").strip()
+        command = str(args.get("command", "")).strip()
         if not command:
             return "ERROR: empty command."
+
+        workdir = ctx.resolve(str(args.get("cwd") or "."))
+        if not workdir.is_dir():
+            return f"ERROR: cwd does not exist: {workdir}"
+
         from .permissions import command_key
-        if not ctx.approve("Run command", command, key=command_key(command)):
+        detail = command if workdir == ctx.cwd else f"(in {workdir})  {command}"
+        if not ctx.approve("Run command", detail, key=command_key(command)):
             return "DENIED: user declined to run the command."
+
+        if str(args.get("background", "")).lower() in ("true", "1", "yes"):
+            return self._run_background(command, workdir, ctx)
+        return self._run_foreground(command, workdir, ctx, args)
+
+    def _run_foreground(self, command, workdir, ctx, args):
+        default_t = int(ctx.config.agent.get("command_timeout", 300))
         try:
-            proc = subprocess.run(
-                command,
-                shell=True,
-                cwd=str(ctx.cwd),
-                capture_output=True,
-                text=True,
-                timeout=180,
+            timeout = min(max(int(args.get("timeout") or default_t), 5), 1800)
+        except (TypeError, ValueError):
+            timeout = default_t
+        try:
+            proc = subprocess.Popen(
+                command, shell=True, cwd=str(workdir),
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                stdin=subprocess.DEVNULL, env=_shell_env(), **_popen_kwargs(),
             )
-        except subprocess.TimeoutExpired:
-            return "ERROR: command timed out after 180s."
         except Exception as e:
             return f"ERROR launching command: {e}"
-        out = (proc.stdout or "")[-6000:]
-        err = (proc.stderr or "")[-3000:]
+        try:
+            out, err = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            _kill_tree(proc)
+            try:
+                out, err = proc.communicate(timeout=5)
+            except Exception:
+                out, err = "", ""
+            partial = (f"\npartial stdout:\n{out[-3000:]}" if out else "") + \
+                      (f"\npartial stderr:\n{err[-1500:]}" if err else "")
+            return (f"ERROR: command killed after {timeout}s.{partial}\n"
+                    "If it is a long install/build, retry with a bigger "
+                    '"timeout". If it is a server/watcher that never exits, '
+                    'rerun it with "background": true.')
+        out = (out or "")[-6000:]
+        err = (err or "")[-3000:]
         parts = [f"exit code: {proc.returncode}"]
         if out:
             parts.append(f"stdout:\n{out}")
         if err:
             parts.append(f"stderr:\n{err}")
         return "\n".join(parts)
+
+    def _run_background(self, command, workdir, ctx):
+        log_dir = Path(ctx.config.data_dir) / "logs"
+        try:
+            pid, proc, log = BACKGROUND.start(command, workdir, log_dir)
+        except Exception as e:
+            return f"ERROR launching background command: {e}"
+        time.sleep(3)  # long enough to catch instant crashes + first output
+        tail = _log_tail(log, 2000)
+        if proc.poll() is not None:
+            return (f"ERROR: background process exited immediately "
+                    f"(exit code {proc.returncode}).\noutput:\n{tail}")
+        return (f"OK: started background process {pid}: {command}\n"
+                f"early output:\n{tail}\n"
+                f'Use {{"tool": "check_process", "args": {{"id": {pid}}}}} to '
+                "see status/output and verify it works (e.g. request the URL "
+                "it serves), and stop_process to stop it.")
+
+
+class CheckProcess(Tool):
+    name = "check_process"
+    description = ("Check a background process started by run_command: is it "
+                   "still running, and what has it printed so far.")
+    args = {"id": "The process id returned when it was started."}
+
+    def run(self, args, ctx):
+        entry = self._entry(args)
+        if isinstance(entry, str):
+            return entry
+        code = entry["proc"].poll()
+        status = "RUNNING" if code is None else f"EXITED (code {code})"
+        return (f"process {args.get('id')}: {status} — {entry['command']}\n"
+                f"output:\n{_log_tail(entry['log'])}")
+
+    @staticmethod
+    def _entry(args):
+        try:
+            pid = int(args.get("id"))
+        except (TypeError, ValueError):
+            return "ERROR: pass the numeric process id."
+        entry = BACKGROUND.get(pid)
+        if not entry:
+            known = ", ".join(str(k) for k in BACKGROUND.procs) or "none"
+            return f"ERROR: no background process {pid} (known: {known})."
+        return entry
+
+
+class StopProcess(Tool):
+    name = "stop_process"
+    description = "Stop a background process started by run_command."
+    args = {"id": "The process id returned when it was started."}
+
+    def run(self, args, ctx):
+        entry = CheckProcess._entry(args)
+        if isinstance(entry, str):
+            return entry
+        if entry["proc"].poll() is not None:
+            return (f"process {args.get('id')} had already exited "
+                    f"(code {entry['proc'].returncode}).")
+        _kill_tree(entry["proc"])
+        return f"OK: stopped process {args.get('id')} ({entry['command']})."
 
 
 # --------------------------------------------------------------------------- #
@@ -206,9 +388,14 @@ class AskUser(Tool):
     description = ("Ask the user ONE short question and get their typed answer. "
                    "Use it to clarify ambiguous requirements before starting, "
                    "to present a plan and confirm it, or to choose between "
-                   "options. Don't use it for permission to run tools — those "
-                   "handle approval themselves.")
+                   "options. Bundle everything you need into it — you get at "
+                   "most 3 questions per task. Never ask about details you can "
+                   "decide yourself (ports, file names, folder layout). Don't "
+                   "use it for permission to run tools — those handle approval "
+                   "themselves.")
     args = {"question": "The question to ask (keep it short and concrete)."}
+
+    MAX_PER_TURN = 3
 
     def run(self, args, ctx):
         question = str(args.get("question", "")).strip()
@@ -216,6 +403,12 @@ class AskUser(Tool):
             return "ERROR: empty question."
         if not ctx.ask:
             return "ERROR: interactive input is not available right now."
+        asked = ctx.state.get("asks", 0)
+        if asked >= self.MAX_PER_TURN:
+            return ("ERROR: you have used all 3 questions for this task. Stop "
+                    "asking — pick sensible defaults for anything still "
+                    "unclear, state them, and continue with the work.")
+        ctx.state["asks"] = asked + 1
         answer = ctx.ask(question)
         return f"The user answered: {answer}" if answer.strip() \
             else "The user gave no answer — use your best judgment and continue."
@@ -349,8 +542,8 @@ class WebFetch(Tool):
 
 ALL_TOOLS = [
     ReadFile(), WriteFile(), EditFile(), ListDir(),
-    SearchFiles(), RunCommand(), Recall(), AskUser(),
-    WebSearch(), WebFetch(),
+    SearchFiles(), RunCommand(), CheckProcess(), StopProcess(),
+    Recall(), AskUser(), WebSearch(), WebFetch(),
 ] + OFFICE_TOOLS
 REGISTRY = {t.name: t for t in ALL_TOOLS}
 

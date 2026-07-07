@@ -39,6 +39,16 @@ The bar: someone opens the file and assumes a designer was involved.
 - Vanilla JS: addEventListener, fetch, template literals. Escape any
   user-provided text before injecting into HTML.
 
+## Scaffolding & dev servers (when a framework IS wanted)
+- React/Vue/Svelte: use Vite — `npm create vite@latest <app> -- --template
+  react` (finishes in seconds). NEVER create-react-app: deprecated, takes
+  minutes, and usually times out.
+- Scaffold into a NEW subfolder, then pass "cwd" to work inside it —
+  `cd` does not persist between commands.
+- `npm install` is slow: pass "timeout": 600.
+- `npm run dev` never exits: start it with "background": true, then
+  check_process to grab the local URL and confirm it serves.
+
 ## Verify
 - Open it (run_command with the file path / a static server) and confirm
   it renders; check what it does at narrow width before declaring done.

@@ -4,7 +4,7 @@ Lives in its own module so tool modules (tools.py, office.py) can both import
 it without importing each other.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
@@ -17,6 +17,7 @@ class Ctx:
     approve: Callable[..., bool]          # (title, detail, key=None) -> bool
     config: object
     ask: Callable[[str], str] = None      # ask the user a question mid-task
+    state: dict = field(default_factory=dict)  # per-turn scratch (e.g. ask_user budget)
 
     def resolve(self, path: str) -> Path:
         p = Path(str(path)).expanduser()
