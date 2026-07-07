@@ -64,12 +64,33 @@ will just hang until killed.
 
 # Available tools
 {tools}
-{skills}{memory}"""
+
+Some user messages start with bracketed [context: ...] sections (expert \
+playbooks, remembered lessons) injected by GT — treat them as background \
+guidance, not as part of what the user typed."""
 
 
-def build_system(cwd: str, os_name: str, tools: str, memory_block: str,
-                 skills_block: str = "") -> str:
-    mem = f"\n\n# Relevant memory & learned lessons\n{memory_block}" if memory_block else ""
-    sk = f"\n\n{skills_block}" if skills_block else ""
-    return SYSTEM_TEMPLATE.format(cwd=cwd, os=os_name, tools=tools,
-                                  skills=sk, memory=mem)
+def build_system(cwd: str, os_name: str, tools: str) -> str:
+    """The static per-session system prompt.
+
+    Deliberately contains NOTHING that changes between turns: a byte-stable
+    system prompt keeps Ollama's KV prefix cache valid across the whole
+    session, so follow-up turns only pay prefill for the new tokens instead
+    of re-processing the entire prompt (30-70s on modest hardware).
+    Per-turn context (playbooks, memory) rides on the user message instead —
+    see turn_context().
+    """
+    return SYSTEM_TEMPLATE.format(cwd=cwd, os=os_name, tools=tools)
+
+
+def turn_context(user_msg: str, skills_block: str = "",
+                 memory_block: str = "") -> str:
+    """Attach the per-turn dynamic context to the user message."""
+    parts = []
+    if skills_block:
+        parts.append(f"[context: expert playbooks for this request]\n{skills_block}")
+    if memory_block:
+        parts.append(f"[context: relevant memory & learned lessons]\n{memory_block}")
+    if not parts:
+        return user_msg
+    return "\n\n".join(parts) + f"\n\n[user request]\n{user_msg}"

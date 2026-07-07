@@ -17,7 +17,7 @@ from pathlib import Path
 
 from rich.text import Text
 
-from .prompts import build_system
+from .prompts import build_system, turn_context
 from .skills import load_skills, select, skills_block
 from .tools import Ctx, active_tools, tool_docs
 from .ui import streaming_markdown
@@ -72,6 +72,29 @@ def extract_tool_call(text):
     return None
 
 
+# The one arg per tool that identifies WHAT it acted on, for the turn digest.
+_DIGEST_ARGS = ("command", "path", "question", "query", "url", "id")
+
+
+def digest_line(name, args, result):
+    """One line remembering a tool step: what ran and how it went.
+
+    These lines are appended to the turn's history entry so follow-up turns
+    ('go ahead', 'now add X') know what was already done — files created,
+    commands run, and what the user answered to ask_user. Without this the
+    model starts every turn amnesiac about its own work.
+    """
+    arg = next((str(args.get(k)) for k in _DIGEST_ARGS if args.get(k)), "")
+    if len(arg) > 100:
+        arg = arg[:100] + "…"
+    first = ""
+    for line in (result or "").strip().splitlines():
+        if line.strip():
+            first = line.strip()[:150]
+            break
+    return f"- {name}({arg}) -> {first}"
+
+
 class Agent:
     def __init__(self, llm, config, memory, router, console, improver,
                  approve, ask=None):
@@ -98,6 +121,11 @@ class Agent:
         self.skills = load_skills() if skills_cfg.get("enabled", True) else []
         self.skills_max = int(skills_cfg.get("max", 2))
 
+        # What's already been injected this session (it lives on in history,
+        # so re-sending it would only waste context tokens).
+        self._seen_skills = set()
+        self._seen_memory = set()
+
     # ---- public API ---------------------------------------------------------
 
     def run(self, user_msg):
@@ -106,21 +134,24 @@ class Agent:
                            f"({self.config.model_for(role)['model']})[/dim]")
 
         memory_block = self._recall(user_msg)
-        picked = select(self.skills, user_msg, limit=self.skills_max)
+        picked = [s for s in select(self.skills, user_msg, limit=self.skills_max)
+                  if s.name not in self._seen_skills]
+        self._seen_skills.update(s.name for s in picked)
         if picked:
             self.console.print(
                 f"[dim]· playbooks: {', '.join(s.name for s in picked)}[/dim]")
-        system = build_system(
-            cwd=str(self.cwd),
-            os_name=platform.system(),
-            tools=self.tool_docs,
-            memory_block=memory_block,
-            skills_block=skills_block(picked),
-        )
+
+        # The system prompt is byte-stable for the whole session; per-turn
+        # context (playbooks, memory) rides on the user message instead. This
+        # keeps Ollama's KV prefix cache valid across turns — follow-ups pay
+        # prefill only for the NEW tokens, not the whole conversation again.
+        system = build_system(cwd=str(self.cwd), os_name=platform.system(),
+                              tools=self.tool_docs)
+        user_content = turn_context(user_msg, skills_block(picked), memory_block)
 
         # Working message list for this turn (includes intermediate tool steps).
         messages = [{"role": "system", "content": system}] + self.history + [
-            {"role": "user", "content": user_msg}
+            {"role": "user", "content": user_content}
         ]
 
         ctx = Ctx(cwd=self.cwd, memory=self.memory,
@@ -128,7 +159,13 @@ class Agent:
 
         model_id = self.config.model_for(role)["model"]
         final_answer = None
+        trace = []                 # digest of tool steps, persisted to history
+        compact_warned = False
         for step in range(1, self.max_steps + 1):
+            if self._fit_context(messages) and not compact_warned:
+                self.console.print("[dim]· compacted older tool output to fit "
+                                   "the context window[/dim]")
+                compact_warned = True
             try:
                 with streaming_markdown(
                     self.console,
@@ -149,6 +186,8 @@ class Agent:
                 break
 
             observation = self._run_tool(call, ctx)
+            trace.append(digest_line(call["tool"], call.get("args") or {},
+                                     observation))
             # Cap what goes back into context — huge tool outputs slow every
             # later step's prefill without adding much signal.
             if len(observation) > 6000:
@@ -162,24 +201,65 @@ class Agent:
                 f"[yellow]Reached max_steps ({self.max_steps}); stopping.[/yellow]"
             )
 
-        # Persist only the clean turn to conversational history (keeps context small).
-        self.history.append({"role": "user", "content": user_msg})
-        if final_answer:
-            self.history.append({"role": "assistant", "content": final_answer})
+        # Persist the turn. The user message goes in AS SENT (cache prefix
+        # stays valid); intermediate tool chatter is replaced by a compact
+        # digest so the next turn knows what was actually done.
+        self.history.append({"role": "user", "content": user_content})
+        stored = final_answer
+        if trace:
+            digest = "\n".join(trace)
+            if len(digest) > 2000:
+                digest = digest[:2000] + "\n… [more steps]"
+            stored = ((final_answer or
+                       "(I was stopped before giving a final answer.)")
+                      + f"\n\n[actions taken this turn]\n{digest}")
+        if stored:
+            self.history.append({"role": "assistant", "content": stored})
 
         # Self-improvement — in the background so the prompt returns NOW
         # instead of making the user wait for the reviewer model.
         if final_answer and self.config.memory.get("auto_learn", True):
             threading.Thread(target=self._maybe_learn,
-                             args=(user_msg, final_answer),
+                             args=(user_msg, final_answer, tuple(trace)),
                              daemon=True).start()
 
         return final_answer
 
     def reset(self):
         self.history.clear()
+        self._seen_skills.clear()
+        self._seen_memory.clear()
 
     # ---- internals ----------------------------------------------------------
+
+    def _fit_context(self, messages, keep_recent=2):
+        """Keep the message list inside the model's context window.
+
+        Past num_ctx, Ollama silently truncates the prompt — and the system
+        prompt with the tool-call instructions is the first thing at risk, so
+        the model quietly degrades into prose mid-task. Instead, shrink the
+        OLDEST tool observations (the most recent `keep_recent` stay intact);
+        the current step rarely needs the full output of step 3. Returns True
+        if anything was compacted.
+        """
+        budget = int(self.config.performance.get("num_ctx", 8192)) - 1024
+        def over():
+            return sum(len(m["content"]) for m in messages) // 4 > budget
+        if not over():
+            return False
+        compacted = False
+        tool_idx = [i for i, m in enumerate(messages)
+                    if m["role"] == "user"
+                    and m["content"].startswith("[tool result:")]
+        for i in (tool_idx[:-keep_recent] if keep_recent else tool_idx):
+            if not over():
+                break
+            head, _, body = messages[i]["content"].partition("\n")
+            if len(body) > 300:
+                messages[i]["content"] = (
+                    f"{head}\n{body[:300]}\n… [older output compacted]")
+                compacted = True
+        return compacted
 
     def _print_timing(self):
         """One dim line of real numbers after every model response, straight
@@ -223,13 +303,26 @@ class Agent:
             hits = self.memory.search(query, k=k, min_score=min_score)
         except LLMError:
             return ""  # embeddings offline — degrade gracefully
-        if not hits:
+        # Skip what was already injected this session (it's still in history)
+        # and cap lessons — a wall of self-help slogans steers small models
+        # more than it helps them.
+        fresh, lessons = [], 0
+        for _, kind, text, _ in hits:
+            if text in self._seen_memory:
+                continue
+            if kind == "lesson":
+                lessons += 1
+                if lessons > 2:
+                    continue
+            fresh.append((kind, text))
+            self._seen_memory.add(text)
+        if not fresh:
             return ""
-        return "\n".join(f"- ({kind}) {text}" for _, kind, text, _ in hits)
+        return "\n".join(f"- ({kind}) {text}" for kind, text in fresh)
 
-    def _maybe_learn(self, user_msg, answer):
+    def _maybe_learn(self, user_msg, answer, trace=()):
         try:
-            lesson = self.improver.learn(user_msg, answer)
+            lesson = self.improver.learn(user_msg, answer, trace)
         except LLMError:
             return
         if lesson:

@@ -14,7 +14,7 @@ class Improver:
         self.memory = memory
         self.reviewer_role = reviewer_role
 
-    def learn(self, user_msg, assistant_msg):
+    def learn(self, user_msg, assistant_msg, trace=()):
         """Extract and store a lesson. Returns the lesson text, or None."""
         messages = [
             {

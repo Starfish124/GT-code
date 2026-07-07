@@ -52,6 +52,81 @@ check("takes the LAST tool call when several appear",
 check("defaults missing args to {}",
       extract_tool_call('```json\n{"tool":"list_dir"}\n```') == {"tool": "list_dir", "args": {}})
 
+print("\nturn digest + context assembly (agent-loop memory between turns)")
+from gt.agent import digest_line, Agent
+from gt.prompts import build_system, turn_context
+check("digest remembers a command and its outcome",
+      digest_line("run_command", {"command": "npm install"}, "exit code: 0\nstdout: ...")
+      == "- run_command(npm install) -> exit code: 0")
+check("digest keeps the user's ask_user answer",
+      "react + Node" in digest_line("ask_user", {"question": "Stack?"},
+                                    "The user answered: react + Node"))
+check("digest truncates huge args", len(digest_line(
+      "write_file", {"path": "x" * 500}, "OK")) < 300)
+sys_prompt = build_system("C:/work", "Windows", "tools...")
+check("system prompt is static (no per-turn slots left)",
+      "{skills}" not in sys_prompt and "{memory}" not in sys_prompt)
+check("system prompt is deterministic (cache-stable)",
+      sys_prompt == build_system("C:/work", "Windows", "tools..."))
+check("turn_context passes plain requests through untouched",
+      turn_context("fix the bug") == "fix the bug")
+tc = turn_context("make a page", skills_block="PLAYBOOK", memory_block="LESSON")
+check("turn_context attaches playbooks + memory to the user message",
+      "PLAYBOOK" in tc and "LESSON" in tc and tc.endswith("make a page"))
+
+print("\ncontext-window fitting (compacts oldest tool output)")
+_fit = Agent._fit_context
+class _FakeAgent:
+    config = cfg
+big = "x" * 8000
+msgs = ([{"role": "system", "content": "SYS"}]
+        + [{"role": "user", "content": f"[tool result: run_command]\n{big}"}
+           for _ in range(6)]
+        + [{"role": "user", "content": "latest question"}])
+check("over-budget messages get compacted", _fit(_FakeAgent(), msgs) is True)
+check("oldest tool result was shrunk", len(msgs[1]["content"]) < 1000)
+check("most recent tool results kept intact", len(msgs[6]["content"]) > 7000)
+check("system prompt untouched", msgs[0]["content"] == "SYS")
+small = [{"role": "system", "content": "SYS"},
+         {"role": "user", "content": "hi"}]
+check("small conversations are left alone", _fit(_FakeAgent(), small) is False)
+
+print("\nagent loop end-to-end (stubbed LLM — no model needed)")
+import io
+from rich.console import Console as _Console
+
+class _StubLLM:
+    last_metrics = None
+    def __init__(self):
+        self.calls = 0
+    def chat(self, role, messages, **kw):
+        self.calls += 1
+        reply = ('```json\n{"tool":"list_dir","args":{"path":"."}}\n```'
+                 if self.calls == 1 else "Done — I listed the folder.")
+        if kw.get("on_token"):
+            kw["on_token"](reply)
+        return reply
+
+class _Stub:
+    def route(self, msg): return "fast"
+    def search(self, *a, **k): return []
+    def learn(self, *a, **k): return None
+
+_quiet = _Console(file=io.StringIO())
+_agent = Agent(llm=_StubLLM(), config=cfg, memory=_Stub(), router=_Stub(),
+               console=_quiet, improver=_Stub(),
+               approve=lambda *a, **k: True, ask=None)
+answer = _agent.run("what files are here?")
+check("loop runs tool then returns the final answer",
+      answer == "Done — I listed the folder.")
+check("turn lands in history as user+assistant pair", len(_agent.history) == 2)
+check("history assistant entry carries the action digest",
+      "[actions taken this turn]" in _agent.history[1]["content"]
+      and "list_dir" in _agent.history[1]["content"])
+_agent.reset()
+check("reset clears history and session-injection tracking",
+      not _agent.history and not _agent._seen_skills)
+
 print("\nchunking")
 chunks = chunk_text("x" * 2500, size=1000, overlap=150)
 check("long text splits into overlapping chunks", len(chunks) == 3)

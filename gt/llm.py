@@ -58,12 +58,19 @@ class LLM:
         model = spec["model"]
         if not think and "qwen3" in model.lower():
             # belt & braces: Qwen3's documented soft switch, for older Ollamas
-            # that ignore the think parameter.
+            # that ignore the think parameter. Appended to the SYSTEM message
+            # (not the newest user message) so the token prefix stays stable
+            # and Ollama's KV cache survives between agent steps.
             messages = [dict(m) for m in messages]
-            for m in reversed(messages):
-                if m["role"] == "user":
-                    m["content"] = m["content"] + " /no_think"
+            for m in messages:
+                if m["role"] == "system":
+                    m["content"] = m["content"] + "\n/no_think"
                     break
+            else:
+                for m in reversed(messages):
+                    if m["role"] == "user":
+                        m["content"] = m["content"] + " /no_think"
+                        break
 
         payload = {
             "model": model,
