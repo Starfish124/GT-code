@@ -193,7 +193,11 @@ class Config:
                 if got is None:
                     got = guess_fn(ids)
                     if got:
-                        say(f"[dim]{role}: '{want}' not served — using '{got}'[/dim]")
+                        hint = (f" [yellow](for the full {role}, run: "
+                                f"ollama pull {want} — or /setup)[/yellow]"
+                                if role == "brain" else "")
+                        say(f"[dim]{role}: '{want}' not served — "
+                            f"using '{got}'[/dim]{hint}")
                 elif got != want:
                     say(f"[dim]{role}: '{want}' → matched '{got}'[/dim]")
                 if got:

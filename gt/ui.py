@@ -40,32 +40,49 @@ class _Waiting:
         return Text(f"{frame} {self.label} — {elapsed:.1f}s{hint}", style="dim")
 
 
+# How much of the in-progress reply the live preview shows. Small on purpose:
+# repainting a buffer taller than the terminal floods Windows consoles (they
+# can't redraw above the viewport, so every refresh appends a full duplicate
+# copy of the reply), and re-parsing all of it as Markdown 12×/s is O(n²).
+_TAIL_CHARS = 1200
+
+
 @contextmanager
 def streaming_markdown(console, refresh_per_second: int = 12,
                        min_chars: int = 24, waiting_label: str = "thinking"):
     """Context manager yielding (on_token, buffer).
 
     Until the first token arrives, a live elapsed counter shows what GT is
-    waiting for. Then tokens re-render as Markdown; re-parsing on every token
-    is wasteful, so we refresh on newlines or every `min_chars` characters.
+    waiting for. While streaming, only the TAIL of the reply is shown in a
+    transient live region; when the reply is complete the preview vanishes
+    and the full text is rendered once, properly, as Markdown.
     """
     buf = _Buffer()
     state = {"rendered": 0}
 
-    with Live(console=console, auto_refresh=True,
-              refresh_per_second=refresh_per_second,
-              vertical_overflow="visible") as live:
+    try:
+        with Live(console=console, auto_refresh=True,
+                  refresh_per_second=refresh_per_second,
+                  transient=True) as live:
 
-        live.update(_Waiting(waiting_label))
+            live.update(_Waiting(waiting_label))
 
-        def render():
-            live.update(Markdown(buf.text) if buf.text.strip() else "")
+            def render():
+                tail = buf.text[-_TAIL_CHARS:]
+                if len(buf.text) > _TAIL_CHARS:
+                    nl = tail.find("\n")
+                    tail = "…\n" + (tail[nl + 1:] if nl != -1 else tail)
+                live.update(Markdown(tail) if tail.strip() else "")
 
-        def on_token(tok: str):
-            buf.text += tok
-            if "\n" in tok or (len(buf.text) - state["rendered"]) >= min_chars:
-                state["rendered"] = len(buf.text)
-                render()
+            def on_token(tok: str):
+                buf.text += tok
+                if "\n" in tok or (len(buf.text) - state["rendered"]) >= min_chars:
+                    state["rendered"] = len(buf.text)
+                    render()
 
-        yield on_token, buf
-        render()  # flush the final tail so nothing is left unrendered
+            yield on_token, buf
+    finally:
+        # The transient preview is gone — print the complete reply once.
+        # Runs on errors/Ctrl-C too, so a partial reply is never lost.
+        if buf.text.strip():
+            console.print(Markdown(buf.text))
