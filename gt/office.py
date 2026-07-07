@@ -142,7 +142,7 @@ class CreatePowerPoint(Tool):
             prs.save(p)
         except Exception as e:
             return f"ERROR saving {p}: {e}"
-        return f"OK: created {p} with {len(prs.slides._sldIdLst)} slide(s)."
+        return f"OK: created {p} with {len(prs.slides)} slide(s)."
 
 
 class CreateWord(Tool):

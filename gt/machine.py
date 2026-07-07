@@ -19,7 +19,8 @@ def _run(cmd, timeout=8):
     """Run a probe command quietly; return stdout or '' on any failure."""
     try:
         out = subprocess.run(cmd, shell=isinstance(cmd, str),
-                             capture_output=True, text=True, timeout=timeout)
+                             capture_output=True, text=True, errors="replace",
+                             timeout=timeout)
         return (out.stdout or "").strip()
     except Exception:
         return ""

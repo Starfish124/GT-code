@@ -52,7 +52,9 @@ ask_user for genuine decisions the user must make.
 
 # Running commands
 - Every run_command starts fresh in the workspace root: `cd` does NOT carry \
-over to the next command. To work inside a subfolder, pass "cwd".
+over to the next command. To work inside a subfolder, pass "cwd". The same \
+goes for environment activation: `activate` does not persist — call a venv's \
+binaries directly (venv/bin/pip, venv\\Scripts\\python).
 - Package installs / scaffolds / builds can be slow — pass a bigger "timeout" \
 (e.g. 600) instead of letting them get killed.
 - A dev server or watcher NEVER exits, so running it normally always times \

@@ -286,8 +286,12 @@ class GTShell:
             self.agent.force_role = None
             self.console.print("model pin cleared — auto-routing decides.")
             return
-        if arg not in self.config.models:
-            self.console.print(f"[yellow]no role '{arg}'. roles: {', '.join(self.config.models)}[/yellow]")
+        # Only chat roles are pinnable — pinning 'embed' would route every
+        # conversation to an embedding model and break chat outright.
+        pinnable = [r for r in ("brain", "fast", "tiny") if r in self.config.models]
+        if arg not in pinnable:
+            self.console.print(f"[yellow]no pinnable role '{arg}'. "
+                               f"roles: {', '.join(pinnable)} (or 'off')[/yellow]")
             return
         self.agent.force_role = arg
         self.console.print(f"pinned to [bold]{arg}[/bold] "
@@ -321,11 +325,13 @@ class GTShell:
         exts = {".py", ".js", ".ts", ".tsx", ".jsx", ".md", ".txt", ".json",
                 ".yaml", ".yml", ".html", ".css", ".go", ".rs", ".java", ".c",
                 ".cpp", ".h", ".sh"}
+        gt_data = str(self.config.data_dir)
         files = [root] if root.is_file() else [
             f for f in root.rglob("*")
             if f.is_file() and f.suffix.lower() in exts
-            and not any(p in {".git", "node_modules", ".venv", "__pycache__", "data"}
+            and not any(p in {".git", "node_modules", ".venv", "__pycache__"}
                         for p in f.parts)
+            and not str(f).startswith(gt_data)   # GT's own db/logs, not "data/"
         ]
         if not files:
             self.console.print("[yellow]no indexable text files found.[/yellow]")

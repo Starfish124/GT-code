@@ -33,6 +33,9 @@ priority: 4
 ## Running & hosting it
 - Pick the port yourself (8000 Python / 3000 Node, or the framework
   default) — never ask the user.
+- venv activation does NOT persist between commands: call the venv's
+  binaries directly (venv/bin/pip install …, venv/bin/uvicorn …;
+  venv\Scripts\... on Windows). Or skip the venv for tiny demos.
 - A server never exits: start it with "background": true, wait, then
   check_process for "listening on ...". Foreground = guaranteed timeout.
 - Verify with a real request (`curl http://localhost:<port>/health` or an

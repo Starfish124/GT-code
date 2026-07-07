@@ -238,6 +238,109 @@ r = RunCommand().run(
     run_ctx)
 check("instant crash in background is reported", "exited immediately" in r)
 
+print("\nleading `cd X &&` folds into the working directory")
+r = RunCommand().run(
+    {"command": f"cd subdir && {py} -c \"import os; print(os.getcwd())\""},
+    run_ctx)
+check("cd X && cmd runs inside X", "subdir" in r and "exit code: 0" in r)
+r = RunCommand().run(
+    {"command": f"cd subdir && {py} -c \"import os; print(os.getcwd())\"",
+     "cwd": "subdir"}, run_ctx)
+check("the doubled cd (cwd arg + cd prefix) no longer fails",
+      "exit code: 0" in r and "No such file" not in r)
+r = RunCommand().run({"command": "cd nowhere-real && echo hi"}, run_ctx)
+check("unresolvable cd target is left for the shell to report",
+      "exit code: 0" not in r)
+
+print("\ndigest marks failures loudly")
+check("failed command flagged in digest",
+      digest_line("run_command", {"command": "x"},
+                  "exit code: 1\nstderr: boom").startswith("- FAILED "))
+check("error result flagged in digest",
+      digest_line("read_file", {"path": "x"},
+                  "ERROR: file not found").startswith("- FAILED "))
+check("exit code 0 is not a failure",
+      not digest_line("run_command", {"command": "x"},
+                      "exit code: 0").startswith("- FAILED"))
+
+print("\ngive-up nudge: prose after a failed step doesn't end the turn")
+class _GiveUpLLM:
+    last_metrics = None
+    def __init__(self):
+        self.calls = 0
+    def chat(self, role, messages, **kw):
+        self.calls += 1
+        reply = {1: '```json\n{"tool":"read_file","args":{"path":"missing.txt"}}\n```',
+                 2: "Hmm, that failed. Let me try again to read the file.",
+                 3: "The file does not exist — nothing to read."}[self.calls]
+        if kw.get("on_token"):
+            kw["on_token"](reply)
+        return reply
+_gagent = Agent(llm=_GiveUpLLM(), config=cfg, memory=_Stub(), router=_Stub(),
+                console=_quiet, improver=_Stub(),
+                approve=lambda *a, **k: True, ask=None)
+answer = _gagent.run("read missing.txt")
+check("nudge forces a third model call after the give-up prose",
+      _gagent.llm.calls == 3)
+check("the post-nudge reply becomes the final answer",
+      answer == "The file does not exist — nothing to read.")
+
+print("\nrun_command survives non-ASCII output (Windows cp1252 crash)")
+r = RunCommand().run(
+    {"command": f"{py} -c \"print('⚠ npm ✓ émoji 🎉')\""}, run_ctx)
+check("unicode output comes back intact", "🎉" in r and "émoji" in r)
+
+print("\nsearch_files: project data/ folders are searchable now")
+proj_data = tmp / "data"
+proj_data.mkdir(exist_ok=True)
+(proj_data / "config.json").write_text('{"secret_setting": 1}', encoding="utf-8")
+from gt.tools import SearchFiles
+check("finds matches inside a project's data/ folder",
+      "secret_setting" in SearchFiles().run(
+          {"query": "secret_setting", "path": "."}, run_ctx))
+(proj_data / "config.json").unlink()
+proj_data.rmdir()
+
+print("\nctrl-c mid-turn keeps the turn's work (stubbed LLM)")
+class _InterruptLLM:
+    last_metrics = None
+    def __init__(self):
+        self.calls = 0
+    def chat(self, role, messages, **kw):
+        self.calls += 1
+        if self.calls == 2:
+            raise KeyboardInterrupt
+        reply = '```json\n{"tool":"list_dir","args":{"path":"."}}\n```'
+        if kw.get("on_token"):
+            kw["on_token"](reply)
+        return reply
+_iagent = Agent(llm=_InterruptLLM(), config=cfg, memory=_Stub(), router=_Stub(),
+                console=_quiet, improver=_Stub(),
+                approve=lambda *a, **k: True, ask=None)
+check("interrupt does not raise out of run()", _iagent.run("list stuff") is None)
+check("interrupted turn still lands in history", len(_iagent.history) == 2)
+check("the step done before the interrupt is remembered",
+      "list_dir" in _iagent.history[1]["content"])
+
+print("\noffice tools produce real files")
+from gt.tools import REGISTRY as _REG
+r = _REG["create_excel"].run(
+    {"path": "t.xlsx", "sheets": [{"name": "S", "headers": ["a", "b"],
+                                   "rows": [[1, 2], [3, 4]]}]}, run_ctx)
+check("create_excel writes a workbook", r.startswith("OK") and (tmp / "t.xlsx").exists())
+r = _REG["create_powerpoint"].run(
+    {"path": "t.pptx", "title": "Deck",
+     "slides": [{"title": "One", "bullets": ["x"], "notes": "n"}]}, run_ctx)
+check("create_powerpoint reports slide count without private APIs",
+      r == f"OK: created {tmp / 't.pptx'} with 2 slide(s).")
+r = _REG["create_word"].run(
+    {"path": "t.docx", "blocks": [{"type": "heading", "text": "H"},
+                                  "plain para",
+                                  {"type": "bullets", "items": ["i1"]}]}, run_ctx)
+check("create_word writes a document", r.startswith("OK") and (tmp / "t.docx").exists())
+for _f in ("t.xlsx", "t.pptx", "t.docx"):
+    (tmp / _f).unlink(missing_ok=True)
+
 # cleanup
 for f in sub.iterdir():
     f.unlink()

@@ -127,7 +127,9 @@ class SearchFiles(Tool):
         "path": "Directory to search under (default: workspace root).",
     }
 
-    _SKIP = {".git", "node_modules", ".venv", "__pycache__", "data", ".idea"}
+    # NOTE: no bare "data" here — user projects legitimately have data/
+    # folders. Only GT's OWN data dir (memory db, logs) is skipped, by path.
+    _SKIP = {".git", "node_modules", ".venv", "__pycache__", ".idea"}
     _EXET = {".py", ".js", ".ts", ".tsx", ".jsx", ".md", ".txt", ".json", ".yaml",
              ".yml", ".toml", ".cfg", ".ini", ".html", ".css", ".sh", ".bat",
              ".go", ".rs", ".java", ".c", ".cpp", ".h"}
@@ -137,10 +139,13 @@ class SearchFiles(Tool):
         query = args.get("query", "")
         if not query:
             return "ERROR: empty query."
+        gt_data = str(Path(ctx.config.data_dir))
         q = query.lower()
         hits, scanned = [], 0
         for f in root.rglob("*"):
             if any(part in self._SKIP for part in f.parts):
+                continue
+            if str(f).startswith(gt_data):
                 continue
             if not f.is_file() or f.suffix.lower() not in self._EXET:
                 continue
@@ -176,7 +181,14 @@ def _shell_env() -> dict:
     env.setdefault("CI", "1")
     env.setdefault("npm_config_yes", "true")
     env.setdefault("GIT_TERMINAL_PROMPT", "0")
+    env.setdefault("PYTHONIOENCODING", "utf-8")  # python children on Windows
     return env
+
+
+# Decode command output as UTF-8 with replacement, never the Windows locale:
+# text=True alone means cp1252 there, and npm's emoji/box-chars raise
+# UnicodeDecodeError inside communicate(), losing the whole command result.
+_DECODE = {"encoding": "utf-8", "errors": "replace"}
 
 
 def _kill_tree(proc: subprocess.Popen):
@@ -218,16 +230,25 @@ class _BackgroundProcs:
             stdout=handle, stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL, env=_shell_env(), **_popen_kwargs(),
         )
-        self.procs[pid] = {"proc": proc, "log": log, "command": command}
+        self.procs[pid] = {"proc": proc, "log": log, "command": command,
+                           "handle": handle}
         return pid, proc, log
 
     def get(self, pid):
         return self.procs.get(pid)
 
+    @staticmethod
+    def close_handle(entry):
+        try:
+            entry["handle"].close()
+        except Exception:
+            pass
+
     def kill_all(self):
         for entry in self.procs.values():
             if entry["proc"].poll() is None:
                 _kill_tree(entry["proc"])
+            self.close_handle(entry)
 
 
 BACKGROUND = _BackgroundProcs()
@@ -270,6 +291,7 @@ class RunCommand(Tool):
         workdir = ctx.resolve(str(args.get("cwd") or "."))
         if not workdir.is_dir():
             return f"ERROR: cwd does not exist: {workdir}"
+        workdir, command = self._fold_cd(command, workdir, ctx)
 
         from .permissions import command_keys
         detail = command if workdir == ctx.cwd else f"(in {workdir})  {command}"
@@ -280,6 +302,34 @@ class RunCommand(Tool):
             return self._run_background(command, workdir, ctx)
         return self._run_foreground(command, workdir, ctx, args)
 
+    _CD = re.compile(r"^cd\s+(\"[^\"]+\"|'[^']+'|[^&;|]+?)\s*(?:&&|;)\s*(.+)$",
+                     re.S)
+
+    @classmethod
+    def _fold_cd(cls, command, workdir, ctx):
+        """Fold a leading `cd X && …` into the working directory.
+
+        Models routinely write `cd app && npm install` AND pass cwd="app" —
+        the doubled cd then fails with 'no such file or directory'. Resolve
+        the cd target against the given cwd first, then the workspace root,
+        and run the rest of the command there. Unresolvable targets are left
+        untouched so the shell can report the real error.
+        """
+        for _ in range(3):  # a couple of chained cds at most
+            m = cls._CD.match(command.strip())
+            if not m:
+                break
+            target = m.group(1).strip().strip("\"'")
+            t = Path(target).expanduser()
+            for cand in ([t] if t.is_absolute()
+                         else [workdir / t, ctx.cwd / t]):
+                if cand.is_dir():
+                    workdir, command = cand, m.group(2).strip()
+                    break
+            else:
+                break
+        return workdir, command
+
     def _run_foreground(self, command, workdir, ctx, args):
         default_t = int(ctx.config.agent.get("command_timeout", 300))
         try:
@@ -289,8 +339,9 @@ class RunCommand(Tool):
         try:
             proc = subprocess.Popen(
                 command, shell=True, cwd=str(workdir),
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                stdin=subprocess.DEVNULL, env=_shell_env(), **_popen_kwargs(),
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                stdin=subprocess.DEVNULL, env=_shell_env(),
+                **_DECODE, **_popen_kwargs(),
             )
         except Exception as e:
             return f"ERROR launching command: {e}"
@@ -373,9 +424,11 @@ class StopProcess(Tool):
         if isinstance(entry, str):
             return entry
         if entry["proc"].poll() is not None:
+            BACKGROUND.close_handle(entry)
             return (f"process {args.get('id')} had already exited "
                     f"(code {entry['proc'].returncode}).")
         _kill_tree(entry["proc"])
+        BACKGROUND.close_handle(entry)
         return f"OK: stopped process {args.get('id')} ({entry['command']})."
 
 
@@ -515,16 +568,25 @@ class WebFetch(Tool):
         except ImportError:
             return "ERROR: web tools need 'beautifulsoup4' (rerun setup)."
         try:
-            r = requests.get(url, headers={"User-Agent": _USER_AGENT}, timeout=20)
+            r = requests.get(url, headers={"User-Agent": _USER_AGENT},
+                             timeout=20, stream=True)
             r.raise_for_status()
+            # Cap the download at 2 MB — a stray link to a huge file would
+            # otherwise be pulled whole and fed to the HTML parser.
+            raw = b""
+            for chunk in r.iter_content(65536):
+                raw += chunk
+                if len(raw) > 2_000_000:
+                    break
         except Exception as e:
             return f"ERROR fetching {url}: {e}"
+        text = raw.decode(r.encoding or "utf-8", errors="replace")
 
         ctype = r.headers.get("Content-Type", "")
         if "html" not in ctype and "xml" not in ctype:
-            return r.text[:15000]  # already plain text / json / code
+            return text[:15000]  # already plain text / json / code
 
-        soup = BeautifulSoup(r.text, "html.parser")
+        soup = BeautifulSoup(text, "html.parser")
         for tag in soup(["script", "style", "noscript", "header", "footer",
                          "nav", "svg", "form"]):
             tag.decompose()

@@ -92,7 +92,11 @@ def digest_line(name, args, result):
         if line.strip():
             first = line.strip()[:150]
             break
-    return f"- {name}({arg}) -> {first}"
+    # Mark failures loudly — follow-up turns must not gloss over them and
+    # claim the work succeeded.
+    failed = (first.startswith(("ERROR", "DENIED"))
+              or bool(re.match(r"exit code: (?!0\b)", first)))
+    return f"- {'FAILED ' if failed else ''}{name}({arg}) -> {first}"
 
 
 class Agent:
@@ -161,45 +165,74 @@ class Agent:
         final_answer = None
         trace = []                 # digest of tool steps, persisted to history
         compact_warned = False
-        for step in range(1, self.max_steps + 1):
-            if self._fit_context(messages) and not compact_warned:
-                self.console.print("[dim]· compacted older tool output to fit "
-                                   "the context window[/dim]")
-                compact_warned = True
-            try:
-                with streaming_markdown(
-                    self.console,
-                    waiting_label=f"waiting for {role} ({model_id})",
-                ) as (on_token, _buf):
-                    reply = self.llm.chat(role, messages, stream=True,
-                                          on_token=on_token)
-            except LLMError as e:
-                self.console.print(f"[red]LLM error:[/red] {e}")
-                return
-            self._print_timing()
+        interrupted = False
+        nudged = False             # one retry-nudge per turn when GT gives up
+        try:
+            for step in range(1, self.max_steps + 1):
+                if self._fit_context(messages) and not compact_warned:
+                    self.console.print("[dim]· compacted older tool output to "
+                                       "fit the context window[/dim]")
+                    compact_warned = True
+                try:
+                    with streaming_markdown(
+                        self.console,
+                        waiting_label=f"waiting for {role} ({model_id})",
+                    ) as (on_token, _buf):
+                        reply = self.llm.chat(role, messages, stream=True,
+                                              on_token=on_token)
+                except LLMError as e:
+                    self.console.print(f"[red]LLM error:[/red] {e}")
+                    return
+                self._print_timing()
 
-            messages.append({"role": "assistant", "content": reply})
-            call = extract_tool_call(reply)
+                messages.append({"role": "assistant", "content": reply})
+                call = extract_tool_call(reply)
 
-            if not call:
-                final_answer = reply.strip()
-                break
+                if not call:
+                    # Small models often stop with 'Let me try again…' prose
+                    # right after a failed step — that is a plan, not an
+                    # answer. Nudge once to keep going instead of ending the
+                    # turn (and hallucinating success on the next one).
+                    if (trace and trace[-1].startswith("- FAILED")
+                            and not nudged and step < self.max_steps):
+                        nudged = True
+                        self.console.print("[dim]· last step failed — nudging "
+                                           "GT to fix it and continue[/dim]")
+                        messages.append({
+                            "role": "user",
+                            "content": ("[system] Your last tool call FAILED "
+                                        "and you stopped without finishing. "
+                                        "Diagnose and fix it now — reply with "
+                                        "your next tool call. Give a final "
+                                        "prose answer only when the task is "
+                                        "done or truly impossible."),
+                        })
+                        continue
+                    final_answer = reply.strip()
+                    break
 
-            observation = self._run_tool(call, ctx)
-            trace.append(digest_line(call["tool"], call.get("args") or {},
-                                     observation))
-            # Cap what goes back into context — huge tool outputs slow every
-            # later step's prefill without adding much signal.
-            if len(observation) > 6000:
-                observation = observation[:6000] + "\n... [truncated for context]"
-            messages.append({
-                "role": "user",
-                "content": f"[tool result: {call['tool']}]\n{observation}",
-            })
-        else:
-            self.console.print(
-                f"[yellow]Reached max_steps ({self.max_steps}); stopping.[/yellow]"
-            )
+                observation = self._run_tool(call, ctx)
+                trace.append(digest_line(call["tool"], call.get("args") or {},
+                                         observation))
+                # Cap what goes back into context — huge tool outputs slow
+                # every later step's prefill without adding much signal.
+                if len(observation) > 6000:
+                    observation = observation[:6000] + "\n... [truncated for context]"
+                messages.append({
+                    "role": "user",
+                    "content": f"[tool result: {call['tool']}]\n{observation}",
+                })
+            else:
+                self.console.print(
+                    f"[yellow]Reached max_steps ({self.max_steps}); "
+                    f"stopping.[/yellow]"
+                )
+        except KeyboardInterrupt:
+            # Don't lose the turn: whatever was already done stays in history
+            # so the next message ('continue', 'go ahead') picks up from here.
+            interrupted = True
+            self.console.print("\n[yellow](interrupted — keeping the work "
+                               "done so far in this turn)[/yellow]")
 
         # Persist the turn. The user message goes in AS SENT (cache prefix
         # stays valid); intermediate tool chatter is replaced by a compact
@@ -213,6 +246,8 @@ class Agent:
             stored = ((final_answer or
                        "(I was stopped before giving a final answer.)")
                       + f"\n\n[actions taken this turn]\n{digest}")
+        elif interrupted:
+            stored = "(interrupted before I did anything)"
         if stored:
             self.history.append({"role": "assistant", "content": stored})
 
