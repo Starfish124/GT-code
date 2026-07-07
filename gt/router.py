@@ -25,14 +25,21 @@ _SMALL_TALK = re.compile(
 _CODE_HINT = re.compile(
     r"\b(code|bug|error|stack ?trace|function|class|refactor|implement|"
     r"compile|test|install|run|file|repo|git|debug|api|regex|script|"
+    r"frontend|backend|website|web ?app|webpage|server|database|deploy|"
+    r"host(ing)?|html|css|react|vue|svelte|node|python|"
     r"\.py|\.js|\.ts|\.rs|\.go|\.java|\.c|\.cpp|\.sh|traceback)\b",
     re.I,
 )
 # Signals that real REASONING is needed -> brain 14B is worth its load time.
+# Checked BEFORE _CODE_HINT: starting something new is a planning task even
+# when it mentions code words ("make a simple frontend and backend").
 _PLAN_HINT = re.compile(
     r"\b(architect(ure)?|design|plan|blueprint|from scratch|new (app|project|"
     r"service|platform)|build me|overhaul|rewrite (the )?(whole|entire)|"
-    r"migrate|restructure|complex|strategy|trade-?offs?|compare .* approaches)\b",
+    r"migrate|restructure|complex|strategy|trade-?offs?|compare .* approaches|"
+    r"full-?stack|"
+    r"(make|build|create|write)\s+(me\s+)?an?\s+(\w+[- ]){0,3}?(app|application|"
+    r"website|site|page|frontend|backend|api|service|game|tool|dashboard|bot)s?)\b",
     re.I,
 )
 

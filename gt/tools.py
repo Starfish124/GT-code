@@ -271,9 +271,9 @@ class RunCommand(Tool):
         if not workdir.is_dir():
             return f"ERROR: cwd does not exist: {workdir}"
 
-        from .permissions import command_key
+        from .permissions import command_keys
         detail = command if workdir == ctx.cwd else f"(in {workdir})  {command}"
-        if not ctx.approve("Run command", detail, key=command_key(command)):
+        if not ctx.approve("Run command", detail, key=command_keys(command)):
             return "DENIED: user declined to run the command."
 
         if str(args.get("background", "")).lower() in ("true", "1", "yes"):

