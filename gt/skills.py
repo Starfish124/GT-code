@@ -32,7 +32,12 @@ from .config import ROOT, USER_DIR
 
 _FRONT = re.compile(r"\A---\s*\n(.*?)\n---\s*\n", re.S)
 
-# The user's imported Agent-Skills library (see skill_import.py).
+# Skill library dirs (bulk Agent-Skills, see skill_import.py):
+#   BUNDLED_LIBRARY_DIR — an OPTIONAL in-repo slot for FIRST-PARTY skills we
+#     author ourselves. It ships empty/absent: GT bundles no third-party
+#     content (kept clean for corporate use). Scanned if present.
+#   LIBRARY_DIR         — the user's OWN imports, in ~/.gt (that machine only).
+BUNDLED_LIBRARY_DIR = ROOT / "skills" / "library"
 LIBRARY_DIR = USER_DIR / "skills" / "library"
 
 
@@ -94,7 +99,7 @@ def load_skills(extra_dirs=None, include_library=True) -> list:
     bundled ones."""
     dirs = [ROOT / "skills", USER_DIR / "skills"]
     if include_library:
-        dirs.append(LIBRARY_DIR)
+        dirs += [BUNDLED_LIBRARY_DIR, LIBRARY_DIR]  # repo-shipped, then user's
     dirs += list(extra_dirs or [])
     found = {}
     for d in dirs:

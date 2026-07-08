@@ -1,14 +1,19 @@
 """Import an Anthropic Agent-Skills library into GT's skill format.
 
-Agent Skills (e.g. github.com/alirezarezvani/claude-skills, MIT) ship as
-`<skill>/SKILL.md` with YAML front matter — a `name` and a natural-language
-`description` ("Use when the user asks to …") — followed by a markdown
-playbook. GT's own skills are single `.md` files keyed by trigger words. This
-converts the former into the latter: it derives trigger keywords from the
-name + description, tags each skill with its source category, and writes them
-into GT's user library (`~/.gt/skills/library/`) where the loader picks them
-up. Embedding-based selection (skills.py) then ranks the whole library
-semantically per request, so keyword coverage only needs to be a fallback.
+GT ships NO third-party skill content of its own — only its first-party core
+playbooks. This is opt-in tooling so a user can bring THEIR OWN Agent-Skills
+library (one they authored, or a source they control/trust) into GT.
+
+Agent Skills ship as `<skill>/SKILL.md` with YAML front matter — a `name` and
+a natural-language `description` ("Use when the user asks to …") — followed by
+a markdown playbook. GT's own skills are single `.md` files keyed by trigger
+words. This converts the former into the latter: it derives trigger keywords
+from the name + description, tags each skill with its source category, and
+writes them into the user's library (`~/.gt/skills/library/`, that machine
+only) where the loader picks them up. Embedding-based selection (skills.py)
+then ranks the whole library semantically per request, so keyword coverage
+only needs to be a fallback. Whatever license the imported source carries is
+the user's responsibility to honour.
 
 Run from GT: `/skills import <path-or-git-url>`.
 """
@@ -107,9 +112,9 @@ def import_library(src: str, out_dir: Path, priority: int = 1):
     try:
         if not root.is_dir():
             raise FileNotFoundError(f"not a directory: {root}")
-        # Skip hidden dirs — .gemini/.codex/.claude/… are plugin MIRRORS of the
-        # same skills (the claude-skills repo duplicates its whole tree into
-        # each), plus .git/.github. Importing them would double every skill.
+        # Skip hidden dirs — some Agent-Skills repos mirror the whole tree into
+        # per-tool plugin dirs (.gemini/.codex/.claude/…); those are duplicates,
+        # plus .git/.github. Importing them would double every skill.
         files = sorted(f for f in root.rglob("SKILL.md")
                        if not any(part.startswith(".")
                                   for part in f.relative_to(root).parts))
@@ -117,7 +122,9 @@ def import_library(src: str, out_dir: Path, priority: int = 1):
             raise FileNotFoundError(f"no SKILL.md files under {root}")
 
         out_dir.mkdir(parents=True, exist_ok=True)
-        for old in out_dir.glob("*.md"):
+        # Only clear previously-generated skills (named "<cat>__<slug>.md") — a
+        # hand-added README.md / LICENSE / attribution in the dir is preserved.
+        for old in out_dir.glob("*__*.md"):
             old.unlink()
 
         count, cats, used = 0, {}, set()

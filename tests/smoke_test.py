@@ -650,6 +650,9 @@ check("Skill.embed_text blends name, description and body",
       "tidy-coder" in _ts.embed_text() and "standard library" in _ts.embed_text())
 _shutil.rmtree(_src, ignore_errors=True); _shutil.rmtree(_out, ignore_errors=True)
 
+check("GT ships NO third-party skill content — only first-party core playbooks",
+      all(not s.category for s in load_skills()))
+
 print("\nembedding-based skill selection (semantic ranking + graceful fallback)")
 _sk = [
     Skill("engineering/minimalist", ["minimal", "simple"], 1, "keep it small", category="engineering"),

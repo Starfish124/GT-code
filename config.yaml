@@ -84,10 +84,12 @@ skills:
                         # 'keyword' forces the offline matcher.
   inject_max_chars: 1500  # cap each injected playbook so a couple of long ones
                           # from an imported library can't blow the context.
-  # Import a big Agent-Skills library (e.g. github.com/alirezarezvani/
-  # claude-skills) from inside GT:  /skills import <path-or-git-url>
-  # Converted skills land in ~/.gt/skills/library/ and are embedded + ranked
-  # semantically per request.
+  # GT ships ONLY the first-party core playbooks above — no third-party skill
+  # content. If YOU want to bulk-load your own Agent-Skills library (a folder
+  # of SKILL.md files, or a git URL you control/trust), import it from inside
+  # GT:  /skills import <path-or-git-url>  — converted skills land in
+  # ~/.gt/skills/library/ (your machine only) and are embedded + ranked
+  # semantically per request. Nothing is fetched automatically.
 
 web:
   enabled: true         # allow the web_search / web_fetch tools (needs internet).

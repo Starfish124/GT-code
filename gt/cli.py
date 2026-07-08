@@ -264,17 +264,17 @@ class GTShell:
             self.console.print("[dim]no skills loaded (skills/ folder missing "
                                "or skills.enabled: false).[/dim]")
             return
-        from .skills import LIBRARY_DIR
-        bundled = [s for s in skills if not str(s.source).startswith(str(LIBRARY_DIR))]
-        library = [s for s in skills if str(s.source).startswith(str(LIBRARY_DIR))]
+        # Library skills carry a category; the hand-written core ones don't.
+        bundled = [s for s in skills if not s.category]
+        library = [s for s in skills if s.category]
         idx = self.agent.skill_index
         state = ("ready" if idx and idx.ready else
                  "building…" if idx else "keyword-only")
         self.console.print(
-            f"[bold]{len(skills)} playbooks[/bold] — {len(bundled)} bundled, "
-            f"{len(library)} imported  ·  semantic index: [cyan]{state}[/cyan]")
+            f"[bold]{len(skills)} playbooks[/bold] — {len(bundled)} core, "
+            f"{len(library)} in the library  ·  semantic index: [cyan]{state}[/cyan]")
 
-        table = Table(title="Bundled playbooks")
+        table = Table(title="Core playbooks")
         table.add_column("skill", style="cyan")
         table.add_column("~words")
         table.add_column("triggers", style="dim")
@@ -296,9 +296,9 @@ class GTShell:
     def _skills_import(self, src):
         if not src:
             self.console.print("[yellow]usage: /skills import <folder-path or "
-                               "git-url>   e.g. /skills import "
-                               "https://github.com/alirezarezvani/claude-skills"
-                               ".git[/yellow]")
+                               "git-url>   — a tree of Agent-Skills SKILL.md "
+                               "files you control or trust (e.g. /skills import "
+                               "./my-skills). GT bundles none itself.[/yellow]")
             return
         from .skills import LIBRARY_DIR
         from . import skill_import
