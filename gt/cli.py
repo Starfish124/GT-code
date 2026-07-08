@@ -40,7 +40,8 @@ HELP = """\
   /route             toggle smart auto-routing on/off
   /think             toggle deep thinking (Qwen3 reasoning mode; off = snappy)
   /temp [code [chat]] show or set sampling temperature (code vs conversation)
-  /skills            list the expert playbooks GT injects per request
+  /skills            list playbooks GT injects per request; '/skills import
+                     <path|git-url>' bulk-imports an Agent-Skills library
   /auto              toggle auto-approve (skip y/n prompts for writes & commands)
   /permissions       show granted permissions; '/permissions clear' revokes all
   /cd <path>         change the workspace directory GT operates in
@@ -167,7 +168,7 @@ class GTShell:
         elif cmd == "/temp":
             self._temp(arg)
         elif cmd == "/skills":
-            self._show_skills()
+            self._skills(arg)
         elif cmd == "/setup":
             wizard.ensure(self.config, self.llm, self.console,
                           self.session.prompt, force=True)
@@ -245,22 +246,75 @@ class GTShell:
             f"conversation [bold]{perf.get('temperature_chat', perf['temperature']):g}"
             f"[/bold]  [dim](this session)[/dim]")
 
+    def _skills(self, arg):
+        parts = arg.split(maxsplit=1)
+        sub = parts[0].lower() if parts else ""
+        if sub == "import":
+            self._skills_import(parts[1].strip() if len(parts) > 1 else "")
+        elif sub in ("reindex", "index"):
+            n = self.agent.reload_skills()
+            self.console.print(f"[green]reindexing {n} skills…[/green] "
+                               "[dim](ranking runs in the background)[/dim]")
+        else:
+            self._show_skills()
+
     def _show_skills(self):
-        if not self.agent.skills:
+        skills = self.agent.skills
+        if not skills:
             self.console.print("[dim]no skills loaded (skills/ folder missing "
                                "or skills.enabled: false).[/dim]")
             return
-        table = Table(title="Expert playbooks (auto-injected per request)")
+        from .skills import LIBRARY_DIR
+        bundled = [s for s in skills if not str(s.source).startswith(str(LIBRARY_DIR))]
+        library = [s for s in skills if str(s.source).startswith(str(LIBRARY_DIR))]
+        idx = self.agent.skill_index
+        state = ("ready" if idx and idx.ready else
+                 "building…" if idx else "keyword-only")
+        self.console.print(
+            f"[bold]{len(skills)} playbooks[/bold] — {len(bundled)} bundled, "
+            f"{len(library)} imported  ·  semantic index: [cyan]{state}[/cyan]")
+
+        table = Table(title="Bundled playbooks")
         table.add_column("skill", style="cyan")
         table.add_column("~words")
         table.add_column("triggers", style="dim")
-        for s in sorted(self.agent.skills, key=lambda s: s.name):
+        for s in sorted(bundled, key=lambda s: s.name):
             table.add_row(s.name, str(s.words), ", ".join(s.triggers[:8])
                           + ("…" if len(s.triggers) > 8 else ""))
         self.console.print(table)
-        self.console.print("[dim]Add your own: drop a .md file with the same "
-                           "front matter into ~/.gt/skills/ (or skills/ in the "
-                           "GT-code folder).[/dim]")
+        if library:
+            cats = {}
+            for s in library:
+                cats[s.category or "?"] = cats.get(s.category or "?", 0) + 1
+            summary = ", ".join(f"{k} ({v})" for k, v in
+                                sorted(cats.items(), key=lambda x: -x[1]))
+            self.console.print(f"[dim]imported library: {summary}[/dim]")
+        self.console.print("[dim]Add your own: a .md file with name/triggers/"
+                           "priority front matter in ~/.gt/skills/. Bulk import: "
+                           "/skills import <path|git-url>[/dim]")
+
+    def _skills_import(self, src):
+        if not src:
+            self.console.print("[yellow]usage: /skills import <folder-path or "
+                               "git-url>   e.g. /skills import "
+                               "https://github.com/alirezarezvani/claude-skills"
+                               ".git[/yellow]")
+            return
+        from .skills import LIBRARY_DIR
+        from . import skill_import
+        try:
+            with self.console.status("[cyan]importing skills…[/cyan]"):
+                count, cats, label = skill_import.import_library(src, LIBRARY_DIR)
+        except Exception as e:
+            self.console.print(f"[red]import failed:[/red] {e}")
+            return
+        top = ", ".join(f"{k} ({v})" for k, v in
+                        sorted(cats.items(), key=lambda x: -x[1])[:6])
+        self.console.print(f"[green]imported {count} skills[/green] from {label} "
+                           f"[dim]→ {LIBRARY_DIR}[/dim]\n[dim]{top}[/dim]")
+        n = self.agent.reload_skills()
+        self.console.print(f"[dim]· {n} playbooks now loaded; embedding them for "
+                           f"semantic search in the background…[/dim]")
 
     def _permissions(self, arg):
         if arg.strip().lower() == "clear":

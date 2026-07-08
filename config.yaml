@@ -78,7 +78,16 @@ skills:
   enabled: true         # inject expert playbooks (skills/*.md) matched to each
                         # request — how to write good code, Claude-style Excel/
                         # PowerPoint/frontend, debugging discipline, etc.
-  max: 2                # at most N playbooks per request (context budget)
+  max: 3                # at most N playbooks per request (context budget)
+  select: auto          # auto = rank ALL skills by embedding similarity when the
+                        # embed model is up, else fall back to keyword triggers.
+                        # 'keyword' forces the offline matcher.
+  inject_max_chars: 1500  # cap each injected playbook so a couple of long ones
+                          # from an imported library can't blow the context.
+  # Import a big Agent-Skills library (e.g. github.com/alirezarezvani/
+  # claude-skills) from inside GT:  /skills import <path-or-git-url>
+  # Converted skills land in ~/.gt/skills/library/ and are embedded + ranked
+  # semantically per request.
 
 web:
   enabled: true         # allow the web_search / web_fetch tools (needs internet).

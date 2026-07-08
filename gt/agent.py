@@ -18,7 +18,7 @@ from pathlib import Path
 from rich.text import Text
 
 from .prompts import build_system, turn_context
-from .skills import load_skills, select, skills_block
+from .skills import load_skills, select, skills_block, SkillIndex
 from .tools import Ctx, active_tools, tool_docs, capability_summary
 from .ui import streaming_markdown
 from .llm import LLMError
@@ -184,6 +184,15 @@ class Agent:
         skills_cfg = config.data.get("skills", {})
         self.skills = load_skills() if skills_cfg.get("enabled", True) else []
         self.skills_max = int(skills_cfg.get("max", 2))
+        self.skills_inject_chars = int(skills_cfg.get("inject_max_chars", 1500))
+        # Semantic skill selection over a (potentially large) imported library.
+        # Built once, cached, and off the main thread so startup stays snappy;
+        # until it's ready, selection falls back to keyword matching.
+        self.skill_index = None
+        if self.skills and skills_cfg.get("select", "auto") != "keyword":
+            self.skill_index = SkillIndex(
+                self.llm, Path(config.data_dir) / "skills_emb.db")
+            self._build_skill_index_async()
 
         # What's already been injected this session (it lives on in history,
         # so re-sending it would only waste context tokens).
@@ -194,15 +203,20 @@ class Agent:
 
     def run(self, user_msg):
         role = self.force_role or self.router.route(user_msg)
-        temperature = self._turn_temperature(user_msg)
-        mode = "chat" if temperature >= self._task_temp() + 1e-9 else "code"
+        conversational = self._is_conversational(user_msg)
+        temperature = self._chat_temp() if conversational else self._task_temp()
         self.console.print(f"[dim]· routed to [bold]{role}[/bold] "
                            f"({self.config.model_for(role)['model']}) · "
-                           f"T={temperature:g} {mode}[/dim]")
+                           f"T={temperature:g} {'chat' if conversational else 'code'}"
+                           f"[/dim]")
 
         memory_block = self._recall(user_msg)
-        picked = [s for s in select(self.skills, user_msg, limit=self.skills_max)
-                  if s.name not in self._seen_skills]
+        # No engineering playbooks in plain conversation — that's just noise.
+        picked = []
+        if not conversational:
+            picked = [s for s in select(self.skills, user_msg,
+                                        limit=self.skills_max, index=self.skill_index)
+                      if s.name not in self._seen_skills]
         self._seen_skills.update(s.name for s in picked)
         if picked:
             self.console.print(
@@ -215,7 +229,8 @@ class Agent:
         system = build_system(cwd=str(self.cwd), os_name=platform.system(),
                               tools=self.tool_docs,
                               capabilities=self.capabilities)
-        user_content = turn_context(user_msg, skills_block(picked), memory_block)
+        user_content = turn_context(
+            user_msg, skills_block(picked, self.skills_inject_chars), memory_block)
 
         # Working message list for this turn (includes intermediate tool steps).
         messages = [{"role": "system", "content": system}] + self.history + [
@@ -333,27 +348,57 @@ class Agent:
         self._seen_skills.clear()
         self._seen_memory.clear()
 
+    def reload_skills(self):
+        """Re-scan skill dirs and rebuild the semantic index (after an import)."""
+        self.skills = load_skills()
+        if self.skills and self.skill_index is not None:
+            self._build_skill_index_async(announce=True)
+        return len(self.skills)
+
+    def _build_skill_index_async(self, announce=False):
+        n = len(self.skills)
+
+        def go():
+            try:
+                added = self.skill_index.build(self.skills)
+            except LLMError:
+                return          # embeddings offline — keyword matching stands in
+            except Exception:
+                return
+            if announce or added:
+                self.console.print(
+                    f"[dim]· skill index ready: {n} playbooks searchable"
+                    + (f" ({added} newly embedded)" if added else "")
+                    + "[/dim]")
+
+        threading.Thread(target=go, daemon=True).start()
+
     # ---- internals ----------------------------------------------------------
 
     def _task_temp(self):
         return float(self.config.performance.get("temperature", 0.3))
 
-    def _turn_temperature(self, user_msg):
-        """Warm for conversation, tight for code — the smooth-conversation knob.
+    def _chat_temp(self):
+        return float(self.config.performance.get("temperature_chat",
+                                                 self._task_temp()))
 
-        Reuses the router's own CODE/PLAN signals: anything that smells like
-        coding, building or planning runs at the precise `temperature` (sharp
-        softmax → reliable tool JSON); plain talk runs at `temperature_chat`
-        (flatter softmax → natural, non-robotic replies). A byte-identical
-        prompt either way, so Ollama's KV cache is unaffected.
+    def _is_conversational(self, user_msg):
+        """True for plain talk, False for coding/building/planning.
+
+        Reuses the router's own CODE/PLAN signals — anything that smells like
+        code, a build, or a plan is 'work'; everything else is conversation.
+        This one call drives both the temperature (warm vs tight) and whether
+        engineering playbooks get injected at all.
         """
         from .router import _CODE_HINT, _PLAN_HINT
-        task = self._task_temp()
-        chat = float(self.config.performance.get("temperature_chat", task))
         text = user_msg or ""
-        if _CODE_HINT.search(text) or _PLAN_HINT.search(text):
-            return task
-        return chat
+        return not (_CODE_HINT.search(text) or _PLAN_HINT.search(text))
+
+    def _turn_temperature(self, user_msg):
+        """Warm for conversation, tight for code (a byte-identical prompt either
+        way, so Ollama's KV cache is unaffected)."""
+        return self._chat_temp() if self._is_conversational(user_msg) \
+            else self._task_temp()
 
     def _stall_reason(self, text, trace):
         """Classify a no-tool-call reply that shouldn't end the turn.

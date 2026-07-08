@@ -593,7 +593,9 @@ check("reviewer sees the tool trace",
 
 print("\nskills — expert playbooks matched per request")
 from gt.skills import load_skills, select, skills_block
-skills = load_skills()
+# bundled-only, so these stay deterministic whether or not a big library has
+# been imported into ~/.gt/skills/library on this machine.
+skills = load_skills(include_library=False)
 names = {s.name for s in skills}
 check("all 8 shipped playbooks load",
       {"excel", "powerpoint", "frontend", "backend", "code-quality",
@@ -612,8 +614,67 @@ check("at most 2 playbooks injected",
 check("no match -> no injection", select(skills, "hello there") == [])
 check("block renders with header",
       skills_block(select(skills, "excel please")).startswith("# Expert playbooks"))
-check("playbooks stay context-lean (<700 words each)",
+check("bundled playbooks stay context-lean (<700 words each)",
       all(s.words < 700 for s in skills))
+
+print("\nskill library import (Agent-Skills -> GT format)")
+from gt import skill_import
+from gt.skills import Skill, SkillIndex, LIBRARY_DIR
+_src = Path(__file__).resolve().parent / "_libsrc"
+_out = Path(__file__).resolve().parent / "_libout"
+import shutil as _shutil
+_shutil.rmtree(_src, ignore_errors=True); _shutil.rmtree(_out, ignore_errors=True)
+(_src / "engineering" / "tidy-coder").mkdir(parents=True)
+(_src / "engineering" / "tidy-coder" / "SKILL.md").write_text(
+    '---\nname: "tidy-coder"\n'
+    'description: "Use when the user asks to write clean, minimal code without '
+    'over-engineering or extra dependencies."\n---\n'
+    '# Tidy Coder\nPrefer the standard library. Delete over add.\n',
+    encoding="utf-8")
+(_src / ".gemini" / "tidy-coder").mkdir(parents=True)   # a mirror that must be skipped
+(_src / ".gemini" / "tidy-coder" / "SKILL.md").write_text(
+    '---\nname: "tidy-coder"\ndescription: "mirror copy"\n---\n# dup\n', encoding="utf-8")
+_n, _cats, _label = skill_import.import_library(str(_src), _out)
+check("importer converts SKILL.md and skips hidden mirror dirs", _n == 1)
+_imported = sorted(_out.glob("*.md"))
+_txt = _imported[0].read_text(encoding="utf-8")
+check("imported skill carries GT front matter", "triggers:" in _txt
+      and "category: engineering" in _txt and "name: engineering/tidy-coder" in _txt)
+check("triggers are derived and drop the 'use when' boilerplate",
+      "clean" in _txt and "minimal" in _txt and "\ntriggers: use," not in _txt)
+_lib = load_skills(extra_dirs=[_out], include_library=False)
+_ts = next(s for s in _lib if s.name == "engineering/tidy-coder")
+check("imported skill parses with its description + category",
+      _ts.category == "engineering" and "clean" in _ts.description.lower())
+check("Skill.embed_text blends name, description and body",
+      "tidy-coder" in _ts.embed_text() and "standard library" in _ts.embed_text())
+_shutil.rmtree(_src, ignore_errors=True); _shutil.rmtree(_out, ignore_errors=True)
+
+print("\nembedding-based skill selection (semantic ranking + graceful fallback)")
+_sk = [
+    Skill("engineering/minimalist", ["minimal", "simple"], 1, "keep it small", category="engineering"),
+    Skill("finance/saas-metrics", ["saas", "arr"], 1, "SaaS finance", category="finance"),
+    Skill("excel", ["excel", "xlsx"], 5, "spreadsheets"),
+]
+class _FakeIndex:
+    ready = True
+    def similarities(self, query, skills):
+        # pretend the query is semantically about minimalist code
+        return {"engineering/minimalist": 0.71, "finance/saas-metrics": 0.12, "excel": 0.20}
+_ranked = select(_sk, "write the least code possible", limit=2, index=_FakeIndex())
+check("embedding index ranks by semantic similarity (no keyword needed)",
+      _ranked and _ranked[0].name == "engineering/minimalist")
+check("sub-threshold skills are dropped under embedding ranking",
+      all(s.name != "finance/saas-metrics" for s in _ranked))
+class _NotReady:
+    ready = False
+    def similarities(self, *a): raise AssertionError("should not be called")
+check("a not-ready index falls back to keyword matching",
+      [s.name for s in select(_sk, "make an excel file", limit=1, index=_NotReady())]
+      == ["excel"])
+check("skills_block trims a long imported body to the injection cap",
+      "[playbook trimmed]" in skills_block(
+          [Skill("x/big", ["x"], 1, "word " * 800)], max_chars=200))
 
 print("\nmode-aware temperature (warm for talk, tight for code)")
 cfg.performance["temperature"] = 0.3
