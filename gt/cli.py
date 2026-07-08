@@ -27,7 +27,7 @@ BANNER = r"""
   ___ _____    ___         _
  / __|_   _|__/ __|___  __| |___
 | (_ | | |___| (__/ _ \/ _` / -_)
- \___| |_|    \___\___/\__,_\___|   local coding agent
+ \___| |_|    \___\___/\__,_\___|
 """
 
 HELP = """\
@@ -51,8 +51,9 @@ HELP = """\
   /reset             clear the current conversation history
   /quit  /exit       leave
 
-Anything else is a request for GT. It will clarify, plan, then use tools
-(files, commands, web, Excel/PowerPoint/Word) — asking permission as it goes.
+Anything else is talk or work. Ask a question and GT just answers; ask for a
+build and it goes straight to it — using tools (files, commands, web,
+Excel/PowerPoint/Word) and asking permission before it changes anything.
 """
 
 
@@ -96,15 +97,15 @@ class GTShell:
     # ---- main loop ----------------------------------------------------------
 
     def run(self):
-        self.console.print(f"[bold cyan]{BANNER}[/bold cyan]")
-        self.console.print(f"[dim]workspace: {self.agent.cwd}   "
-                           f"(GT works on the folder you launch it from — "
-                           f"/cd to change)[/dim]")
+        from . import __version__
+        self.console.print(f"[bold cyan]{BANNER}[/bold cyan]", end="")
+        self.console.print(f"[dim]  local coding agent · v{__version__}[/dim]\n")
+        self.console.print(f"[dim]workspace ›[/dim] {self.agent.cwd}")
         wizard.ensure(self.config, self.llm, self.console, self.session.prompt)
         self._startup_check()
         self._warmup(self.config.router.get("default", "fast"))
-        self.console.print("Type [bold]/help[/bold] for commands, "
-                           "[bold]/quit[/bold] to exit.\n")
+        self.console.print("\n[dim]/help for commands · /quit to exit · just "
+                           "type to talk or build[/dim]\n")
         while True:
             try:
                 text = self.session.prompt("gt› ").strip()

@@ -21,6 +21,23 @@ _USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                "(KHTML, like Gecko) Chrome/122.0 Safari/537.36")
 
 
+def _file_preview(content: str, head_lines: int = 6) -> str:
+    """A tight summary for the write-permission prompt — never the whole file.
+
+    Dumping a 4000-char HTML file into the approval box buries the one thing
+    the user is deciding on (which file, how big) under a wall of code. Show
+    the size and just the first few lines instead.
+    """
+    if not content.strip():
+        return "(empty file)"
+    lines = content.splitlines()
+    size = f"{len(lines)} line{'s' if len(lines) != 1 else ''}, {len(content)} chars"
+    head = "\n".join(lines[:head_lines])
+    if len(lines) > head_lines:
+        head += f"\n… (+{len(lines) - head_lines} more lines)"
+    return f"{size}\n{head}"
+
+
 # --------------------------------------------------------------------------- #
 #  File tools
 # --------------------------------------------------------------------------- #
@@ -57,8 +74,7 @@ class WriteFile(Tool):
     def run(self, args, ctx):
         p = ctx.resolve(args["path"])
         content = args.get("content", "")
-        preview = content if len(content) < 800 else content[:800] + "\n... [more]"
-        if not ctx.approve(f"Write {p}", preview, key="files"):
+        if not ctx.approve(f"Write {p}", _file_preview(content), key="files"):
             return "DENIED: user declined the write."
         try:
             p.parent.mkdir(parents=True, exist_ok=True)
@@ -439,16 +455,33 @@ class StopProcess(Tool):
 #  Interaction tool — lets GT clarify requirements like Claude Code does
 # --------------------------------------------------------------------------- #
 
+def _echoes_user(question: str, user_msg: str) -> bool:
+    """True if `question` just parrots the user's own message back at them.
+
+    Small models often turn a question they should ANSWER ("can you use the
+    internet?") into an ask_user call with the very same words — a maddening
+    loop. Compare the word sets: a near-identical restatement, or a subset of
+    what the user just said, is an echo, not a real clarifying question.
+    """
+    q = set(re.findall(r"[a-z0-9]+", (question or "").lower()))
+    u = set(re.findall(r"[a-z0-9]+", (user_msg or "").lower()))
+    if len(q) < 2 or not u:
+        return False
+    overlap = len(q & u)
+    return (overlap / len(q | u) >= 0.6) or (overlap >= 2 and q <= u)
+
+
 class AskUser(Tool):
     name = "ask_user"
     description = ("Ask the user ONE short question and get their typed answer. "
-                   "Use it to clarify ambiguous requirements before starting, "
-                   "to present a plan and confirm it, or to choose between "
-                   "options. Bundle everything you need into it — you get at "
-                   "most 3 questions per task. Never ask about details you can "
-                   "decide yourself (ports, file names, folder layout). Don't "
-                   "use it for permission to run tools — those handle approval "
-                   "themselves.")
+                   "ONLY for a genuine decision that blocks you and that you "
+                   "cannot reasonably make yourself. NEVER use it to answer or "
+                   "repeat a question the user asked you — answer that directly "
+                   "in prose. Never ask about details you can decide yourself "
+                   "(stack, ports, file names, folder layout) — pick a sensible "
+                   "default and note it. You get at most 3 questions per task. "
+                   "Don't use it for permission to run tools — those handle "
+                   "approval themselves.")
     args = {"question": "The question to ask (keep it short and concrete)."}
 
     MAX_PER_TURN = 3
@@ -459,6 +492,13 @@ class AskUser(Tool):
             return "ERROR: empty question."
         if not ctx.ask:
             return "ERROR: interactive input is not available right now."
+        # Don't hand the user their own question back — answer it directly.
+        if _echoes_user(question, getattr(ctx, "user_msg", "")):
+            return ("ERROR: that just repeats the user's own message back to "
+                    "them. Do NOT ask it. ANSWER it directly in prose from "
+                    "what you know and what you can do (your tools/capabilities "
+                    "are listed in your instructions). Use ask_user only for a "
+                    "NEW decision the user has not already stated.")
         asked = ctx.state.get("asks", 0)
         if asked >= self.MAX_PER_TURN:
             return ("ERROR: you have used all 3 questions for this task. Stop "
@@ -620,6 +660,40 @@ def active_tools(config) -> list:
     """Return the tools available given config (drops web tools if disabled)."""
     web_on = getattr(config, "web", {}).get("enabled", True)
     return [t for t in ALL_TOOLS if web_on or t.name not in _WEB_TOOLS]
+
+
+# A short, human phrase for each tool that grants a real capability — used to
+# tell GT (and, through it, the user) what it can actually do. Tools that are
+# plumbing (list_dir, process control, ask_user) map to None and are omitted.
+_CAPABILITY = {
+    "read_file": "read files",
+    "write_file": "create and write files",
+    "edit_file": "edit files",
+    "search_files": "search across the codebase",
+    "run_command": "run shell commands, scripts and dev servers",
+    "recall": "remember things across sessions",
+    "web_search": "search the web",
+    "web_fetch": "open and read web pages",
+    "create_excel": "build Excel spreadsheets",
+    "create_powerpoint": "build PowerPoint decks",
+    "create_word": "write Word documents",
+}
+
+
+def capability_summary(tools=None) -> str:
+    """One readable clause listing what GT can do, from the ACTIVE tools.
+
+    Because web tools drop out when web.enabled is false, the summary is
+    always truthful — GT won't claim internet access it doesn't have.
+    """
+    tools = list(tools if tools is not None else ALL_TOOLS)
+    phrases, seen = [], set()
+    for t in tools:
+        phrase = _CAPABILITY.get(t.name)
+        if phrase and phrase not in seen:
+            seen.add(phrase)
+            phrases.append(phrase)
+    return ", ".join(phrases)
 
 
 def tool_docs(tools=None) -> str:

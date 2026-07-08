@@ -19,7 +19,7 @@ from rich.text import Text
 
 from .prompts import build_system, turn_context
 from .skills import load_skills, select, skills_block
-from .tools import Ctx, active_tools, tool_docs
+from .tools import Ctx, active_tools, tool_docs, capability_summary
 from .ui import streaming_markdown
 from .llm import LLMError
 
@@ -176,6 +176,9 @@ class Agent:
         # Tools available this session (web tools dropped if web.enabled=false).
         self.tools = {t.name: t for t in active_tools(config)}
         self.tool_docs = tool_docs(self.tools.values())
+        # A truthful "what you can do" clause built from the active tools —
+        # so GT answers capability questions instead of asking them.
+        self.capabilities = capability_summary(self.tools.values())
 
         # Expert playbooks, matched per-request and injected into context.
         skills_cfg = config.data.get("skills", {})
@@ -207,7 +210,8 @@ class Agent:
         # keeps Ollama's KV prefix cache valid across turns — follow-ups pay
         # prefill only for the NEW tokens, not the whole conversation again.
         system = build_system(cwd=str(self.cwd), os_name=platform.system(),
-                              tools=self.tool_docs)
+                              tools=self.tool_docs,
+                              capabilities=self.capabilities)
         user_content = turn_context(user_msg, skills_block(picked), memory_block)
 
         # Working message list for this turn (includes intermediate tool steps).
@@ -216,7 +220,8 @@ class Agent:
         ]
 
         ctx = Ctx(cwd=self.cwd, memory=self.memory,
-                  approve=self.approve, config=self.config, ask=self.ask)
+                  approve=self.approve, config=self.config, ask=self.ask,
+                  user_msg=user_msg)
 
         model_id = self.config.model_for(role)["model"]
         final_answer = None
@@ -410,11 +415,38 @@ class Agent:
             result = tool.run(args, ctx)
         except Exception as e:
             result = f"ERROR running {name}: {e}"
-        # Compact, markup-safe trace of the tool result the user can follow.
-        shown = result if len(result) < 1200 else result[:1200] + "\n... [truncated]"
-        self.console.print(f"[bold cyan]⚙ {name}[/bold cyan]")
-        self.console.print(Text(shown, style="dim"))
+        self._show_step(name, args, result)
         return result
+
+    # What each tool acted on, for the one-line step header (path, cmd, …).
+    _STEP_TARGET = ("path", "command", "query", "url", "id", "question")
+
+    def _show_step(self, name, args, result):
+        """A clean, minimal trace of one tool step — status, not a code dump.
+
+        The header names the tool and what it touched; the body is a trimmed
+        few-line result. File CONTENTS (read_file, write previews) are shown as
+        a size, never dumped — that noise is exactly what made GT feel cluttered.
+        """
+        target = next((str(args.get(k)) for k in self._STEP_TARGET
+                       if args.get(k)), "")
+        if len(target) > 60:
+            target = "…" + target[-59:]
+        head = f"[bold cyan]⚙ {name}[/bold cyan]"
+        if target:
+            head += f"  [dim]{target}[/dim]"
+        self.console.print(head)
+
+        body = (result or "").strip()
+        if name == "read_file" and not body.startswith("ERROR"):
+            body = f"{body.count(chr(10)) + 1} lines read"
+        else:
+            lines = body.splitlines()
+            if len(lines) > 6 or len(body) > 400:
+                body = "\n".join(lines[:6])[:400].rstrip() + "\n…"
+        if body:
+            self.console.print(Text("   " + body.replace("\n", "\n   "),
+                                    style="dim"))
 
     def _recall(self, query):
         k = int(self.config.memory.get("recall_k", 5))

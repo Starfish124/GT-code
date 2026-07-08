@@ -17,6 +17,7 @@ class Ctx:
     approve: Callable[..., bool]          # (title, detail, key=None) -> bool
     config: object
     ask: Callable[[str], str] = None      # ask the user a question mid-task
+    user_msg: str = ""                    # the request that started this turn
     state: dict = field(default_factory=dict)  # per-turn scratch (e.g. ask_user budget)
 
     def resolve(self, path: str) -> Path:

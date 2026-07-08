@@ -196,6 +196,44 @@ for _ in range(2):  # 2 more asks -> budget of 3 used up
 check("ask_user cuts off after 3 questions per task",
       "used all 3 questions" in AskUser().run({"question": "a 4th?"}, ask_ctx))
 
+print("\nask_user won't hand the user's own question back (the internet bug)")
+from gt.tools import _echoes_user, capability_summary, _file_preview
+check("detects a verbatim echo",
+      _echoes_user("Can you use the internet?", "can you use the internet?"))
+check("detects a question that's a subset of what the user said",
+      _echoes_user("use the internet", "can you use the internet please"))
+check("a genuinely new decision is NOT an echo",
+      not _echoes_user("Which port should the API use?", "build me a todo app"))
+_asked = []
+_echo_ctx = Ctx(cwd=tmp, memory=None, approve=lambda *_, **__: True, config=cfg,
+                ask=lambda q: _asked.append(q) or "whatever",
+                user_msg="can you use the internet?")
+_er = AskUser().run({"question": "Can you use the internet?"}, _echo_ctx)
+check("an echoed question is blocked before the user is ever prompted",
+      "ANSWER it directly" in _er and _asked == [])
+check("blocking an echo does not spend the ask budget",
+      _echo_ctx.state.get("asks", 0) == 0)
+
+print("\ncapability summary is truthful about what GT can do (web on/off)")
+check("summary lists web access when web is on",
+      "search the web" in capability_summary(active_tools(cfg)))
+cfg.web = {"enabled": False}
+check("summary drops all web access when web is off",
+      "web" not in capability_summary(active_tools(cfg)))
+cfg.web = {"enabled": True}
+check("summary always lists file writing", "write files" in capability_summary())
+check("system prompt injects the capability list",
+      "search the web" in build_system("C:/w", "Windows", "tools",
+                                        capabilities="search the web"))
+
+print("\nwrite-permission preview is a summary, not the whole file")
+_big = "\n".join(f"<div>line {i}</div>" for i in range(200))
+_prev = _file_preview(_big)
+check("preview shows a size line", "200 lines" in _prev)
+check("preview is far smaller than the file it describes", len(_prev) < len(_big))
+check("preview truncates with a +more marker", "+194 more lines" in _prev)
+check("empty content -> empty-file note", _file_preview("") == "(empty file)")
+
 print("\nrun_command: cwd / timeout / background")
 import sys as _sys
 from gt.tools import RunCommand, CheckProcess, StopProcess, BACKGROUND
