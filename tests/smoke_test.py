@@ -615,6 +615,24 @@ check("block renders with header",
 check("playbooks stay context-lean (<700 words each)",
       all(s.words < 700 for s in skills))
 
+print("\nmode-aware temperature (warm for talk, tight for code)")
+cfg.performance["temperature"] = 0.3
+cfg.performance["temperature_chat"] = 0.7
+_tagent = Agent(llm=_StubLLM(), config=cfg, memory=_Stub(), router=_Stub(),
+                console=_quiet, improver=_Stub(),
+                approve=lambda *a, **k: True, ask=None)
+check("plain conversation runs warm",
+      _tagent._turn_temperature("what do you think about rust?") == 0.7)
+check("a greeting runs warm", _tagent._turn_temperature("hey how are you") == 0.7)
+check("a coding request runs tight",
+      _tagent._turn_temperature("fix the bug in main.py") == 0.3)
+check("a build/plan request runs tight",
+      _tagent._turn_temperature("build me a react app") == 0.3)
+import inspect as _inspect
+from gt.llm import LLM
+check("chat() default temperature is None (config-driven, not a hardcoded 0.3)",
+      _inspect.signature(LLM.chat).parameters["temperature"].default is None)
+
 print("\nrouter heuristics (no LLM call) — the 3B/8B/14B speed ladder")
 r = Router(llm=None, config=cfg)
 check("small talk -> tiny", r.route("hi") == "tiny")

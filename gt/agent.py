@@ -194,8 +194,11 @@ class Agent:
 
     def run(self, user_msg):
         role = self.force_role or self.router.route(user_msg)
+        temperature = self._turn_temperature(user_msg)
+        mode = "chat" if temperature >= self._task_temp() + 1e-9 else "code"
         self.console.print(f"[dim]· routed to [bold]{role}[/bold] "
-                           f"({self.config.model_for(role)['model']})[/dim]")
+                           f"({self.config.model_for(role)['model']}) · "
+                           f"T={temperature:g} {mode}[/dim]")
 
         memory_block = self._recall(user_msg)
         picked = [s for s in select(self.skills, user_msg, limit=self.skills_max)
@@ -241,6 +244,7 @@ class Agent:
                         waiting_label=f"waiting for {role} ({model_id})",
                     ) as (on_token, _buf):
                         reply = self.llm.chat(role, messages, stream=True,
+                                              temperature=temperature,
                                               on_token=on_token)
                 except LLMError as e:
                     self.console.print(f"[red]LLM error:[/red] {e}")
@@ -330,6 +334,26 @@ class Agent:
         self._seen_memory.clear()
 
     # ---- internals ----------------------------------------------------------
+
+    def _task_temp(self):
+        return float(self.config.performance.get("temperature", 0.3))
+
+    def _turn_temperature(self, user_msg):
+        """Warm for conversation, tight for code — the smooth-conversation knob.
+
+        Reuses the router's own CODE/PLAN signals: anything that smells like
+        coding, building or planning runs at the precise `temperature` (sharp
+        softmax → reliable tool JSON); plain talk runs at `temperature_chat`
+        (flatter softmax → natural, non-robotic replies). A byte-identical
+        prompt either way, so Ollama's KV cache is unaffected.
+        """
+        from .router import _CODE_HINT, _PLAN_HINT
+        task = self._task_temp()
+        chat = float(self.config.performance.get("temperature_chat", task))
+        text = user_msg or ""
+        if _CODE_HINT.search(text) or _PLAN_HINT.search(text):
+            return task
+        return chat
 
     def _stall_reason(self, text, trace):
         """Classify a no-tool-call reply that shouldn't end the turn.

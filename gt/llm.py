@@ -28,11 +28,17 @@ class LLM:
 
     # ---- chat ---------------------------------------------------------------
 
-    def chat(self, role, messages, stream=True, temperature=0.3,
+    def chat(self, role, messages, stream=True, temperature=None,
              on_token=None, timeout=600):
         """Return the assistant's full text. If stream=True, on_token(str) is
         called with each incremental chunk as it arrives. Timing details of
-        the call land in self.last_metrics."""
+        the call land in self.last_metrics.
+
+        temperature=None uses the configured task default (performance.
+        temperature); callers pass an explicit value to override — the agent
+        runs conversation warmer than code, the router classifies at 0."""
+        if temperature is None:
+            temperature = float(self._perf("temperature", 0.3))
         spec = self.config.model_for(role)
         self.last_metrics = None
         try:

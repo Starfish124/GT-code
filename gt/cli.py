@@ -39,6 +39,7 @@ HELP = """\
   /model <role|off>  pin a model role (brain/fast/tiny) or 'off' to auto-route
   /route             toggle smart auto-routing on/off
   /think             toggle deep thinking (Qwen3 reasoning mode; off = snappy)
+  /temp [code [chat]] show or set sampling temperature (code vs conversation)
   /skills            list the expert playbooks GT injects per request
   /auto              toggle auto-approve (skip y/n prompts for writes & commands)
   /permissions       show granted permissions; '/permissions clear' revokes all
@@ -163,6 +164,8 @@ class GTShell:
                 + ("[yellow](slower, more careful — Qwen3 reasons before "
                    "answering)[/yellow]" if on
                    else "[dim](snappy default)[/dim]"))
+        elif cmd == "/temp":
+            self._temp(arg)
         elif cmd == "/skills":
             self._show_skills()
         elif cmd == "/setup":
@@ -217,6 +220,30 @@ class GTShell:
                 pass  # warmup is best-effort; real calls will surface errors
 
         threading.Thread(target=go, daemon=True).start()
+
+    def _temp(self, arg):
+        perf = self.config.performance
+        if not arg:
+            self.console.print(
+                f"temperature — [bold]code/tools {perf.get('temperature', 0.3):g}[/bold]"
+                f"  ·  [bold]conversation {perf.get('temperature_chat', 0.7):g}[/bold]\n"
+                f"[dim]softmax sharpness: lower = precise/deterministic, higher = "
+                f"varied/natural. GT uses the code value for build & coding turns, "
+                f"the conversation value for plain talk. Set: /temp <code> [chat][/dim]")
+            return
+        try:
+            vals = [min(max(float(p), 0.0), 2.0) for p in arg.split()[:2]]
+        except ValueError:
+            self.console.print("[yellow]usage: /temp <code> [chat]   "
+                               "e.g. /temp 0.3 0.7[/yellow]")
+            return
+        perf["temperature"] = vals[0]
+        if len(vals) > 1:
+            perf["temperature_chat"] = vals[1]
+        self.console.print(
+            f"temperature → code/tools [bold]{perf['temperature']:g}[/bold], "
+            f"conversation [bold]{perf.get('temperature_chat', perf['temperature']):g}"
+            f"[/bold]  [dim](this session)[/dim]")
 
     def _show_skills(self):
         if not self.agent.skills:

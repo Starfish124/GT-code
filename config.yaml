@@ -60,6 +60,14 @@ performance:
                         # toggle per-session with /think when you want deep thought.
   keep_alive: 30m       # keep models hot in RAM between requests (no reload churn)
   num_ctx: 8192         # context window; bigger = slower prompt processing
+  # Sampling temperature T reshapes the softmax over token logits:
+  #   p_i = exp(z_i / T) / sum_j exp(z_j / T)
+  # Low T = sharp/deterministic (good for code & tool-call JSON); high T =
+  # flatter/more natural (good for conversation). GT picks per turn: code &
+  # build requests use `temperature`, plain conversation uses `temperature_chat`.
+  temperature: 0.3      # precision default — code, tools, edits, planning
+  temperature_chat: 0.7 # talking: warmer so replies feel natural, not robotic
+                        # see/set live with /temp
 
 memory:
   auto_learn: true      # after each task, the reviewer extracts a lesson into memory
