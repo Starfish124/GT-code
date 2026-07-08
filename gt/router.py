@@ -15,6 +15,8 @@ ambiguous middle costs one word from the 3B classifier.
 
 import re
 
+from . import machine
+
 # Obvious small talk -> tiny model, no LLM call needed.
 _SMALL_TALK = re.compile(
     r"^\s*(hi|hey|hello|yo|sup|thanks|thank you|ty|ok|okay|cool|nice|"
@@ -52,7 +54,30 @@ class Router:
         self.enabled = config.router.get("enabled", True)
         self.default_role = config.router.get("default", "fast")
 
+        # On a CPU-only machine a 14B crawls (the corporate-laptop case), so
+        # prefer the 8B: route work that would go to 'brain' to 'fast' instead.
+        # Detected once at startup; /model brain still forces the 14B.
+        self.prefer_fast = False
+        self.slow_hw = None
+        if config.router.get("prefer_fast_on_slow", True):
+            try:
+                hw = machine.probe()
+                if machine.slow_for_large_models(hw):
+                    self.prefer_fast = True
+                    self.slow_hw = hw
+            except Exception:
+                pass
+
     def route(self, user_msg) -> str:
+        return self._cap(self._pick(user_msg))
+
+    def _cap(self, role) -> str:
+        """Downgrade 'brain' to 'fast' on a slow machine (if 'fast' exists)."""
+        if self.prefer_fast and role == "brain" and "fast" in self.config.models:
+            return "fast"
+        return role
+
+    def _pick(self, user_msg) -> str:
         if not self.enabled:
             return self.default_role
 

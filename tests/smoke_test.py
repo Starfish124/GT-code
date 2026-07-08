@@ -715,6 +715,7 @@ check("chat() default temperature is None (config-driven, not a hardcoded 0.3)",
       _inspect.signature(LLM.chat).parameters["temperature"].default is None)
 
 print("\nrouter heuristics (no LLM call) — the 3B/8B/14B speed ladder")
+cfg.router["prefer_fast_on_slow"] = False   # test raw routing, hardware-independent
 r = Router(llm=None, config=cfg)
 check("small talk -> tiny", r.route("hi") == "tiny")
 check("everyday coding -> fast 8B", r.route("fix the bug in main.py") == "fast")
@@ -729,6 +730,25 @@ check("everyday frontend fix -> fast",
       r.route("fix the css on my website") == "fast")
 check("hosting/deploy chatter -> fast, not the 3B classifier",
       r.route("deploy the server to port 5000") == "fast")
+
+print("\nrouter prefers the 8B on slow (CPU-only) machines")
+from gt.machine import slow_for_large_models
+check("x86 no-GPU box is slow for large models",
+      slow_for_large_models({"os": "Windows 10", "arch": "AMD64", "vram_gb": None}))
+check("an NVIDIA VRAM box is not slow",
+      not slow_for_large_models({"os": "Windows 10", "arch": "AMD64", "vram_gb": 8}))
+check("Apple Silicon (Metal GPU) is not flagged slow",
+      not slow_for_large_models({"os": "Darwin 24.1.0", "arch": "arm64", "vram_gb": None}))
+_rslow = Router(llm=None, config=cfg)
+_rslow.prefer_fast = True
+check("slow machine downgrades brain -> fast",
+      _rslow.route("design the architecture for a new app") == "fast")
+check("slow machine keeps everyday coding on fast",
+      _rslow.route("fix the css on my website") == "fast")
+check("slow machine still sends small talk to tiny",
+      _rslow.route("hi") == "tiny")
+check("fast machine keeps brain for planning",
+      r.route("design the architecture for a new app") == "brain")  # r has prefer_fast off
 
 print(f"\n{'='*40}\n{ok} passed, {fail} failed")
 sys.exit(1 if fail else 0)

@@ -47,6 +47,10 @@ models:
 router:
   enabled: true         # auto-pick a model per request; toggle at runtime with /route
   default: fast         # the 8B workhorse — brain (14B) only when reasoning is needed
+  prefer_fast_on_slow: true  # on a CPU-only machine (no GPU) a 14B crawls at a
+                             # couple tok/s, so route 'brain' work to the 8B
+                             # instead. Auto-detected at startup. /model brain
+                             # still forces the 14B; set false to always allow it.
 
 agent:
   max_steps: 20         # max tool-use iterations before GT must give a final answer

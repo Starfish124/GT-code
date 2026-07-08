@@ -122,6 +122,23 @@ def probe() -> dict:
     }
 
 
+def slow_for_large_models(hw: dict) -> bool:
+    """True when a 14B would run on the CPU and crawl (single-digit tok/s).
+
+    What makes a large model usable is GPU acceleration:
+      - a discrete GPU with VRAM (NVIDIA) — fast, and
+      - Apple Silicon's Metal GPU over unified memory — slow but workable.
+    Anything else is an x86 box with only an integrated / absent GPU, so Ollama
+    runs on the CPU where a 14B is painfully slow — prefer the 8B there.
+    """
+    if hw.get("vram_gb"):                       # real VRAM (NVIDIA) → fast
+        return False
+    arch = (hw.get("arch") or "").lower()
+    if "Darwin" in (hw.get("os") or "") and arch in ("arm64", "aarch64"):
+        return False                            # Apple Silicon Metal → workable
+    return True                                 # CPU-only inference → slow
+
+
 # --------------------------------------------------------------------------- #
 #  Model catalogue + tiering
 # --------------------------------------------------------------------------- #

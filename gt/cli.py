@@ -104,6 +104,10 @@ class GTShell:
         self.console.print(f"[dim]workspace:[/dim] {self.agent.cwd}")
         wizard.ensure(self.config, self.llm, self.console, self.session.prompt)
         self._startup_check()
+        if self.router.prefer_fast:
+            gpu = (self.router.slow_hw or {}).get("gpu") or "no GPU"
+            self.console.print(f"[dim]· CPU-only machine ({gpu}) — preferring the "
+                               f"8B for speed; /model brain forces the 14B[/dim]")
         self._warmup(self.config.router.get("default", "fast"))
         self.console.print("\n[dim]/help for commands · /quit to exit · just "
                            "type to talk or build[/dim]\n")
@@ -342,6 +346,14 @@ class GTShell:
                                    f"[dim]({spec['provider']})[/dim]")
             except KeyError:
                 self.console.print(f"  {role:<9} [red]unconfigured[/red]")
+        if self.router.prefer_fast:
+            self.console.print("[bold]Routing[/bold]  CPU-only — 'brain' work "
+                               "goes to the 8B (fast). [dim]/model brain forces "
+                               "the 14B; set router.prefer_fast_on_slow: false to "
+                               "disable[/dim]")
+        else:
+            self.console.print("[bold]Routing[/bold]  GPU/accelerated — full "
+                               "speed ladder (8B default, 14B for planning)")
         self._startup_check()
 
     def _show_models(self):
