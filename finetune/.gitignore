@@ -1,0 +1,5 @@
+# Generated / derived training artifacts — regenerable, not source.
+data/
+adapters/
+fused/
+gguf/

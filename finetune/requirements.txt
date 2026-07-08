@@ -1,0 +1,4 @@
+# Fine-tuning tooling only — NOT a GT runtime dependency.
+# Apple Silicon LoRA trainer + the Ollama HTTP client for dataset generation.
+mlx-lm>=0.20.0
+requests>=2.31.0
