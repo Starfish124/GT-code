@@ -78,9 +78,23 @@ MLX chat JSONL — one conversation per line, trained on the assistant turns:
 Using GT's **real** system prompt (from `gt.prompts`) keeps training
 on-distribution, so the tuned model behaves the same way the runtime drives it.
 
+## Gotchas (learned the hard way)
+
+- **Pin the versions.** mlx-lm 0.28+ requires transformers 5.x, which breaks
+  mlx-lm's tokenizer — training then silently produces **nan loss** (the
+  forward/val loss looks fine, so it's easy to miss). Use the matched pair in
+  `requirements.txt`: mlx-lm 0.26.x + transformers 4.x.
+- **Sequence length.** Every row carries GT's full ~2.4k-token system prompt,
+  so rows are 2.5k–3.5k tokens. `--max-seq-length` must exceed the longest row
+  (3584 here); truncating cuts the assistant label and destabilises training.
+- **Learning rate.** A 4-bit base diverges to nan at 1e-4; 2e-5 is stable.
+- The big shared system prompt also dilutes signal (most of each row is
+  identical boilerplate). For a real run, grow the dataset a lot and/or train
+  with a leaner system prompt — the prototype just proves the pipeline.
+
 ## Status
 
 - [x] dataset foundation: `seed_data.py`, `build_dataset.py` (validated rows)
-- [ ] MLX LoRA training run on a 3B
-- [ ] GGUF export + `ollama create` + GT wiring
-- [ ] eval harness (reuse the smoke tasks) + A/B vs base
+- [x] MLX LoRA training run on a Qwen2.5-3B (4-bit), healthy decreasing loss
+- [ ] GGUF export + `ollama create` + GT wiring (export needs a llama.cpp checkout)
+- [ ] scale the dataset (more tasks, qwen3:14b teacher) + eval vs base

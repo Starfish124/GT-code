@@ -1,4 +1,11 @@
 # Fine-tuning tooling only — NOT a GT runtime dependency.
 # Apple Silicon LoRA trainer + the Ollama HTTP client for dataset generation.
-mlx-lm>=0.20.0
+#
+# VERSION PIN MATTERS: mlx-lm 0.28+ (incl. 0.31.x) declares transformers>=5.0.0,
+# but transformers 5.x breaks mlx-lm's tokenizer registration (AutoTokenizer.
+# register with a str) — the model imports but LoRA training silently produces
+# nan loss (forward/val loss is fine, the backward pass is wrong). Pin a MATCHED
+# pair: mlx-lm 0.26.x with transformers 4.x. Verified: healthy, decreasing loss.
+mlx-lm==0.26.3
+transformers>=4.44,<5
 requests>=2.31.0
