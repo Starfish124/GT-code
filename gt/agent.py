@@ -75,6 +75,18 @@ def extract_tool_call(text):
 # Any fenced block (```lang\n…```) — used to lift raw write_file content.
 _ANYFENCE = re.compile(r"```[^\n`]*\n(.*?)```", re.S)
 
+# Questions about GT's OWN abilities — conversation, not a task, even when they
+# carry a code word ('test', 'run', 'file'). Checked after PLAN_HINT so a real
+# "build me an app" still counts as work.
+_CAPABILITY_Q = re.compile(
+    r"(?i)\b(what can (you|u) do"
+    r"|can (you|u) (use|access|reach|browse|search|read|see|open|get on|"
+    r"connect to|go on)"
+    r"|do (you|u) (have|support|work|know|use)"
+    r"|are (you|u) able to"
+    r"|do (you|u) have access"
+    r"|is it possible for (you|u))\b")
+
 
 def attach_content_block(call, reply):
     """Let write_file take its content as a raw fenced block after the json.
@@ -211,12 +223,17 @@ class Agent:
                            f"[/dim]")
 
         memory_block = self._recall(user_msg)
-        # No engineering playbooks in plain conversation — that's just noise.
-        picked = []
-        if not conversational:
-            picked = [s for s in select(self.skills, user_msg,
-                                        limit=self.skills_max, index=self.skill_index)
-                      if s.name not in self._seen_skills]
+        # Conversation gets ONLY the light conversation playbook (no heavy
+        # engineering playbooks bloating a simple prompt); work gets up to N
+        # relevant ones, with the conversation playbook kept out of that pool.
+        if conversational:
+            conv = next((s for s in self.skills if s.name == "conversation"), None)
+            candidates = [conv] if conv else []
+        else:
+            pool = [s for s in self.skills if s.name != "conversation"]
+            candidates = select(pool, user_msg, limit=self.skills_max,
+                                index=self.skill_index)
+        picked = [s for s in candidates if s.name not in self._seen_skills]
         self._seen_skills.update(s.name for s in picked)
         if picked:
             self.console.print(
@@ -253,10 +270,12 @@ class Agent:
                     self.console.print("[dim]· compacted older tool output to "
                                        "fit the context window[/dim]")
                     compact_warned = True
+                ptok = sum(len(m["content"]) for m in messages) // 4
                 try:
                     with streaming_markdown(
                         self.console,
-                        waiting_label=f"waiting for {role} ({model_id})",
+                        waiting_label=f"{role} ({model_id}) · reading "
+                                      f"~{ptok}-token prompt",
                     ) as (on_token, _buf):
                         reply = self.llm.chat(role, messages, stream=True,
                                               temperature=temperature,
@@ -343,6 +362,29 @@ class Agent:
 
         return final_answer
 
+    def prewarm(self, role):
+        """Prefill+cache GT's REAL system prompt in the background at startup.
+
+        The old warmup sent a bare 'Reply: OK', which loads the weights but does
+        NOT cache the big system prompt — so the FIRST real turn paid the whole
+        system-prompt prefill (tens of seconds on a CPU box). Sending the exact
+        runtime system prompt now means turn 1 reuses Ollama's KV cache and only
+        prefills the short user message.
+        """
+        def go():
+            try:
+                system = build_system(cwd=str(self.cwd),
+                                      os_name=platform.system(),
+                                      tools=self.tool_docs,
+                                      capabilities=self.capabilities)
+                self.llm.chat(role,
+                              [{"role": "system", "content": system},
+                               {"role": "user", "content": "Reply: OK"}],
+                              stream=False, timeout=300)
+            except Exception:
+                pass  # best-effort; real calls surface any error
+        threading.Thread(target=go, daemon=True).start()
+
     def reset(self):
         self.history.clear()
         self._seen_skills.clear()
@@ -385,14 +427,21 @@ class Agent:
     def _is_conversational(self, user_msg):
         """True for plain talk, False for coding/building/planning.
 
-        Reuses the router's own CODE/PLAN signals — anything that smells like
-        code, a build, or a plan is 'work'; everything else is conversation.
-        This one call drives both the temperature (warm vs tight) and whether
-        engineering playbooks get injected at all.
+        Order matters: a real build/plan request is always work; then a question
+        about GT's own abilities ("do you have access to the internet?", "what
+        can you do?") is conversation EVEN IF it contains a code word like
+        'test', 'run' or 'file' (that was the "lets test it out, do you have
+        internet?" false-positive that pulled in 3 code playbooks); otherwise
+        fall back to the router's code signal. Drives both temperature and
+        whether engineering playbooks get injected.
         """
         from .router import _CODE_HINT, _PLAN_HINT
         text = user_msg or ""
-        return not (_CODE_HINT.search(text) or _PLAN_HINT.search(text))
+        if _PLAN_HINT.search(text):
+            return False
+        if _CAPABILITY_Q.search(text):
+            return True
+        return not _CODE_HINT.search(text)
 
     def _turn_temperature(self, user_msg):
         """Warm for conversation, tight for code (a byte-identical prompt either
@@ -468,9 +517,9 @@ class Agent:
             parts.append(f"prompt {m['prefill_s']:.1f}s"
                          + (f" ({m['prompt_tokens']} tok)" if m.get("prompt_tokens") else ""))
         if m.get("tps"):
-            parts.append(f"{m['tps']:.0f} tok/s × {m['tokens']} tok")
+            parts.append(f"{m['tps']:.0f} tok/s x {m['tokens']} tok")
         parts.append(f"total {m.get('total_s', 0):.1f}s")
-        self.console.print(f"[dim]  ⏱ {' · '.join(parts)}[/dim]")
+        self.console.print(f"[dim]  time: {' · '.join(parts)}[/dim]")
 
     def _run_tool(self, call, ctx):
         name = call.get("tool")
@@ -501,7 +550,7 @@ class Agent:
                        if args.get(k)), "")
         if len(target) > 60:
             target = "…" + target[-59:]
-        head = f"[bold cyan]⚙ {name}[/bold cyan]"
+        head = f"[bold cyan]> {name}[/bold cyan]"
         if target:
             head += f"  [dim]{target}[/dim]"
         self.console.print(head)
@@ -547,4 +596,4 @@ class Agent:
         except LLMError:
             return
         if lesson:
-            self.console.print(f"[dim]✎ learned: {lesson}[/dim]")
+            self.console.print(f"[dim]learned: {lesson}[/dim]")

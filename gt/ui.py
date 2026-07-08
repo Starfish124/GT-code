@@ -22,11 +22,12 @@ class _Buffer:
 
 
 class _Waiting:
-    """Renders 'waiting…' with a live elapsed counter — Live's auto-refresh
-    re-calls __rich__ every tick, so the seconds count up on screen while
-    the model loads / prefills before the first token."""
+    """Renders a live status with an elapsed counter — Live's auto-refresh
+    re-calls __rich__ every tick, so the seconds count up on screen while the
+    model loads / prefills the prompt before the first token. The message names
+    the stage so a long wait is explained, not just spinning."""
 
-    _FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+    _FRAMES = "|/-\\"          # plain ASCII, renders everywhere (no emoji)
 
     def __init__(self, label: str):
         self.label = label
@@ -34,9 +35,13 @@ class _Waiting:
 
     def __rich__(self) -> Text:
         elapsed = time.perf_counter() - self.t0
-        frame = self._FRAMES[int(elapsed * 8) % len(self._FRAMES)]
-        hint = "  (loading the model into RAM — first call costs this once)" \
-            if elapsed > 4 else ""
+        frame = self._FRAMES[int(elapsed * 4) % len(self._FRAMES)]
+        if elapsed < 3:
+            hint = ""
+        elif elapsed < 12:
+            hint = "  (loading model into RAM — one-time)"
+        else:
+            hint = "  (large prompt on CPU is slow — this is prompt-reading, not stuck)"
         return Text(f"{frame} {self.label} — {elapsed:.1f}s{hint}", style="dim")
 
 

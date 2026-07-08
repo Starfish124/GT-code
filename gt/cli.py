@@ -4,7 +4,6 @@ Run with:  python -m gt   (or start.bat on Windows)
 """
 
 import sys
-import threading
 from pathlib import Path
 
 from prompt_toolkit import PromptSession
@@ -102,7 +101,7 @@ class GTShell:
         from . import __version__
         self.console.print(f"[bold cyan]{BANNER}[/bold cyan]", end="")
         self.console.print(f"[dim]  local coding agent · v{__version__}[/dim]\n")
-        self.console.print(f"[dim]workspace ›[/dim] {self.agent.cwd}")
+        self.console.print(f"[dim]workspace:[/dim] {self.agent.cwd}")
         wizard.ensure(self.config, self.llm, self.console, self.session.prompt)
         self._startup_check()
         self._warmup(self.config.router.get("default", "fast"))
@@ -112,7 +111,7 @@ class GTShell:
             try:
                 text = self.session.prompt("gt› ").strip()
             except (EOFError, KeyboardInterrupt):
-                self.console.print("\nbye 👋")
+                self.console.print("\nbye")
                 return
             if not text:
                 continue
@@ -137,7 +136,7 @@ class GTShell:
         arg = parts[1].strip() if len(parts) > 1 else ""
 
         if cmd in ("/quit", "/exit"):
-            self.console.print("bye 👋")
+            self.console.print("bye")
             return True
         elif cmd == "/help":
             self.console.print(HELP)
@@ -212,15 +211,9 @@ class GTShell:
             return
         self.console.print(f"[dim]· warming up {role} ({model}) in the "
                            f"background…[/dim]")
-
-        def go():
-            try:
-                self.llm.chat(role, [{"role": "user", "content": "Reply: OK"}],
-                              stream=False, timeout=300)
-            except Exception:
-                pass  # warmup is best-effort; real calls will surface errors
-
-        threading.Thread(target=go, daemon=True).start()
+        # Prewarm with the REAL system prompt so the first turn reuses the KV
+        # cache instead of paying the whole system-prompt prefill.
+        self.agent.prewarm(role)
 
     def _temp(self, arg):
         perf = self.config.performance

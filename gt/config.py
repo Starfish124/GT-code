@@ -160,9 +160,9 @@ class Config:
     def auto_resolve(self, llm, console=None):
         """Best-effort startup pass so GT 'just works' on a fresh machine:
 
-        * ping each provider and report ✓/✗,
+        * ping each provider and report reachability,
         * match every role's configured model id against what's actually
-          served (exact → fuzzy → best guess for placeholders like
+          served (exact -> fuzzy -> best guess for placeholders like
           'your-28b-model'),
         * if a role's provider is down (e.g. LM Studio not started), re-point
           the role at any live provider (brain falls back to Ollama).
@@ -176,11 +176,11 @@ class Config:
         for name, prov in self.providers.items():
             try:
                 served[name] = llm.list_models(prov["base_url"])
-                say(f"[green]✓[/green] {name}: {len(served[name])} model(s) "
+                say(f"[green]ok[/green] {name}: {len(served[name])} model(s) "
                     f"at {prov['base_url']}")
             except Exception:
                 served[name] = None
-                say(f"[yellow]✗[/yellow] {name}: not reachable at "
+                say(f"[yellow]--[/yellow] {name}: not reachable at "
                     f"{prov['base_url']} [dim](GT will fall back if it can)[/dim]")
         live = [n for n, ids in served.items() if ids]
 
@@ -199,7 +199,7 @@ class Config:
                         say(f"[dim]{role}: '{want}' not served — "
                             f"using '{got}'[/dim]{hint}")
                 elif got != want:
-                    say(f"[dim]{role}: '{want}' → matched '{got}'[/dim]")
+                    say(f"[dim]{role}: '{want}' -> matched '{got}'[/dim]")
                 if got:
                     m["model"] = got
                     continue

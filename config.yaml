@@ -78,7 +78,10 @@ skills:
   enabled: true         # inject expert playbooks (skills/*.md) matched to each
                         # request — how to write good code, Claude-style Excel/
                         # PowerPoint/frontend, debugging discipline, etc.
-  max: 3                # at most N playbooks per request (context budget)
+  max: 2                # at most N playbooks per request. Keep low: each one is
+                        # more prompt to prefill, and on a CPU box that's real
+                        # seconds per turn. Conversation gets only the light
+                        # 'conversation' playbook (or none).
   select: auto          # auto = rank ALL skills by embedding similarity when the
                         # embed model is up, else fall back to keyword triggers.
                         # 'keyword' forces the offline matcher.

@@ -611,7 +611,11 @@ check("bug report -> debugging playbook",
       "debugging" in [s.name for s in select(skills, "fix this traceback error")])
 check("at most 2 playbooks injected",
       len(select(skills, "debug the code error in my html api backend excel")) <= 2)
-check("no match -> no injection", select(skills, "hello there") == [])
+# the light 'conversation' playbook is handled by the agent's conversational
+# path, not code-turn selection — exclude it here, as the agent does.
+_code_pool = [s for s in skills if s.name != "conversation"]
+check("no engineering playbook for small talk",
+      select(_code_pool, "hello there") == [])
 check("block renders with header",
       skills_block(select(skills, "excel please")).startswith("# Expert playbooks"))
 check("bundled playbooks stay context-lean (<700 words each)",
@@ -692,6 +696,19 @@ check("a coding request runs tight",
       _tagent._turn_temperature("fix the bug in main.py") == 0.3)
 check("a build/plan request runs tight",
       _tagent._turn_temperature("build me a react app") == 0.3)
+# capability questions are conversation even with a stray code word in them
+check("'lets test it out, do you have access to the internet?' is conversation",
+      _tagent._is_conversational("lets test it out, do you have access to the internet?"))
+check("'can you use the internet?' is conversation",
+      _tagent._is_conversational("can you use the internet?"))
+check("a real build phrased as a question is still work",
+      not _tagent._is_conversational("can you build me a todo app?"))
+check("plain coding stays work despite the word test",
+      not _tagent._is_conversational("fix the failing unit test in main.py"))
+# conversation gets the light conversation playbook, not engineering ones
+from gt.skills import load_skills as _ls
+check("a conversation playbook ships and is loadable",
+      any(s.name == "conversation" for s in _ls(include_library=False)))
 import inspect as _inspect
 from gt.llm import LLM
 check("chat() default temperature is None (config-driven, not a hardcoded 0.3)",

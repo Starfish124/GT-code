@@ -129,7 +129,7 @@ def _select_keyword(skills, text, limit):
     return [s[2] for s in scored[:max(0, int(limit))]]
 
 
-def select(skills, text, limit=2, index=None, min_score=0.32):
+def select(skills, text, limit=2, index=None, min_score=0.40):
     """Pick the most relevant skills for a request.
 
     With an embedding `index` ready, rank the WHOLE library by semantic

@@ -85,7 +85,7 @@ def _plan_table(rec: dict, served: list) -> Table:
 
 def _pull(model_id: str, console) -> bool:
     """Run `ollama pull` with live progress in the user's terminal."""
-    console.print(f"[cyan]⇣ pulling {model_id} …[/cyan]")
+    console.print(f"[cyan]pulling {model_id} …[/cyan]")
     try:
         proc = subprocess.run(["ollama", "pull", model_id])
         ok = proc.returncode == 0
@@ -93,9 +93,9 @@ def _pull(model_id: str, console) -> bool:
         console.print(f"[red]could not run ollama pull: {e}[/red]")
         return False
     if ok:
-        console.print(f"[green]✓ {model_id} ready[/green]")
+        console.print(f"[green]{model_id} ready[/green]")
     else:
-        console.print(f"[red]✗ pull failed for {model_id} — "
+        console.print(f"[red]pull failed for {model_id} — "
                       f"run 'ollama pull {model_id}' manually.[/red]")
     return ok
 

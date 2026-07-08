@@ -99,7 +99,7 @@ class Permissions:
                 return True
 
         border = "red" if dangerous else "yellow"
-        header = ("⚠ DANGEROUS — always requires confirmation"
+        header = ("! DANGEROUS — always requires confirmation"
                   if dangerous else "Permission needed")
         self.console.print(Panel(Text(detail or "(no details)"),
                                  title=f"{header} — {title}",
@@ -117,7 +117,7 @@ class Permissions:
         if ans in ("a", "always") and keys and not dangerous:
             self.grants.update(keys)
             self._save()
-            self.console.print(f"[green]✓ {', '.join(keys)} allowed from now "
+            self.console.print(f"[green]ok: {', '.join(keys)} allowed from now "
                                f"on (manage with /permissions)[/green]")
             return True
         return ans in ("y", "yes")
