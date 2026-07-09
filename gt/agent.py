@@ -18,6 +18,7 @@ from pathlib import Path
 from rich.text import Text
 
 from .hooks import Hooks
+from .intent import IntentGate, AFFIRM
 from .prompts import build_system, turn_context
 from .skills import load_skills, select, skills_block, SkillIndex
 from .tools import Ctx, active_tools, tool_docs, capability_summary, render_todos
@@ -237,6 +238,14 @@ class Agent:
         # that ALWAYS run at fixed points — pre_tool can veto a call outright.
         self.hooks = Hooks(config, console)
 
+        # Confidence-gated planning (intent.py): a new build-shaped request
+        # gets one small triage call weighing its plausible readings; low
+        # confidence routes to plan-first or ONE clarifying question instead
+        # of blind execution. _pending_plan marks "a gated plan awaits the
+        # user's go" — the next affirmative turn builds.
+        self.intent_gate = IntentGate(llm, config, console)
+        self._pending_plan = False
+
         # Tools available this session (web tools dropped if web.enabled=false).
         self.tools = {t.name: t for t in active_tools(config)}
         self.tool_docs = tool_docs(self.tools.values())
@@ -285,6 +294,35 @@ class Agent:
                            f"T={temperature:g} {'chat' if conversational else 'code'}"
                            f"[/dim]")
 
+        # Confidence gate: before a NEW build starts, weigh the plausible
+        # readings of the request. High confidence builds immediately (the
+        # bias-to-action stays); medium plans first; low asks ONE question.
+        # Fail-open: any gate problem means "build as before".
+        clarify_block = ""
+        if self.intent_gate.should_gate(user_msg, conversational, self.mode,
+                                        self.todos):
+            self.console.print("[dim]· weighing the request before building "
+                               "(intent check)…[/dim]")
+            a = self.intent_gate.assess(user_msg, role)
+            verdict = self.intent_gate.decide(a) if a else "build"
+            if a:
+                self.console.print(f"[dim]· intent: {a.reading or user_msg[:60]}"
+                                   f" · confidence {a.confidence}% → "
+                                   f"{verdict}[/dim]")
+            if verdict == "ask" and not self.ask:
+                verdict = "plan"        # nobody to ask — plan instead
+            if verdict == "ask":
+                answer = (self.ask(a.question) or "").strip()
+                if answer:
+                    clarify_block = f"Q: {a.question}\nA: {answer}"
+                # no answer = "just use defaults"; carry on and build
+            elif verdict == "plan":
+                prompt_mode = "plan"
+                self._pending_plan = True
+                self.console.print(f"[dim]· confidence below "
+                                   f"{self.intent_gate.min_confidence}% — "
+                                   f"planning first; say 'go' to build[/dim]")
+
         # Conversation doesn't need RAG recall — skip the embedding round-trip
         # (and the noise of self-help lessons in small talk). Work turns still
         # pull relevant memory/lessons. This also protects the resident 3B's
@@ -331,7 +369,8 @@ class Agent:
         user_content = turn_context(
             user_msg, skills_block(picked, self.skills_inject_chars),
             memory_block, todos_block,
-            hook_block=self.hooks.user_prompt(user_msg, cwd=self.cwd))
+            hook_block=self.hooks.user_prompt(user_msg, cwd=self.cwd),
+            clarify_block=clarify_block)
 
         # Working message list for this turn (includes intermediate tool steps).
         # The session summary (if any) rides between the system prompt and the
@@ -340,6 +379,11 @@ class Agent:
         messages = ([{"role": "system", "content": system}]
                     + self._summary_context() + self.history
                     + [{"role": "user", "content": user_content}])
+
+        # Plan turns (forced /mode plan or a gated low-confidence build) are
+        # enforced at the TOOL level, not just in the prompt — observed live:
+        # a 3B ignored the plan directive and started writing files anyway.
+        self._plan_turn = (prompt_mode == "plan")
 
         ctx = Ctx(cwd=self.cwd, memory=self.memory,
                   approve=self.approve, config=self.config, ask=self.ask,
@@ -527,6 +571,7 @@ class Agent:
         self._seen_memory.clear()
         self.todos.clear()
         self.session_summary = ""
+        self._pending_plan = False
 
     def compact_now(self):
         """Fold the WHOLE conversation into the session summary (/compact).
@@ -688,12 +733,18 @@ class Agent:
         classifier so behaviour is predictable (a coding session stays coding).
         A /model pin still wins over the mode's default model.
         """
+        # A gated plan from last turn: an affirmative ("go", "do it") builds
+        # NOW — the plan is in history, so the work prompt picks it up. Any
+        # other message means the user redirected; the pending plan lapses.
+        pending, self._pending_plan = self._pending_plan, False
         if self.mode == "chat":
             return (self.force_role or "tiny"), True, True, "chat"
         if self.mode == "code":
             return (self.force_role or self._forced_role("fast")), False, False, "work"
         if self.mode == "plan":
             return (self.force_role or self._forced_role("brain")), False, False, "plan"
+        if pending and AFFIRM.match(user_msg or ""):
+            return (self.force_role or self._forced_role("fast")), False, False, "work"
         role = self.force_role or self.router.route(user_msg)
         conversational = self._is_conversational(user_msg)
         chat_only = self._chat_only(user_msg)
@@ -717,6 +768,12 @@ class Agent:
         # as a raw JSON blob.
         if '"tool"' in text and "{" in text:
             return "badjson"
+        # A plan turn's whole job is prose that ANNOUNCES future work and
+        # stops — the intent/failed nudges would shove it into building
+        # (observed live: the nudge pushed a model straight into the
+        # write_file that plan mode then had to deny).
+        if getattr(self, "_plan_turn", False):
+            return None
         if trace and trace[-1].startswith("- FAILED"):
             return "failed"
         # Verbatim repeat of the previous turn's answer — the 'yes' → same
@@ -889,6 +946,17 @@ class Agent:
             self.console.print(f"[red]· unknown tool: {name}[/red]")
             return (f"ERROR: unknown tool '{name}'. Available: "
                     f"{', '.join(self.tools)}")
+        # A plan turn only PROPOSES: mutating tools are refused outright, so
+        # the plan-first promise holds even when the model ignores the prompt.
+        if getattr(self, "_plan_turn", False) and getattr(tool,
+                                                          "changes_system",
+                                                          False):
+            result = (f"DENIED: PLAN MODE is active — this turn only "
+                      f"proposes, it never builds. Do not call {name} now; "
+                      f"present the plan in plain prose and STOP. The user "
+                      f"approves with 'go', and the next turn builds.")
+            self._show_step(name, args, result)
+            return result
         # pre_tool hooks run FIRST — a standing user rule (exit code 2) vetoes
         # the call before it happens, no matter what the model decided.
         allowed, why = self.hooks.pre_tool(name, args, cwd=self.cwd)

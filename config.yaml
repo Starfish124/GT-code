@@ -137,6 +137,23 @@ profile:
   min_turns: 4          # skip analysis for a session shorter than this
   max_observations: 8   # cap how many preferences the profile holds
 
+intent_gate:
+  enabled: true         # confidence-gated planning: before a NEW build starts,
+                        # GT spends one small model call weighing the plausible
+                        # READINGS of the request (what's specified vs left to
+                        # defaults). The confidence routes deterministically:
+                        # high = build immediately (bias-to-action unchanged),
+                        # medium = present a plan and wait for your "go",
+                        # low = ask ONE clarifying question, then build.
+                        # Never fires on chat, quick tasks, mid-task turns, or
+                        # forced /mode code|plan sessions. Fail-open: if the
+                        # check can't run, GT just builds as before.
+  min_confidence: 75    # at/above this -> build now
+  ask_below: 45         # below this (and a good question exists) -> ask once;
+                        # between the two -> plan first
+  gate_len: 240         # non-build work requests at least this long are also
+                        # gated (a long spec deserves a read-back)
+
 hooks:
   enabled: true         # deterministic lifecycle scripts: YOUR shell commands
                         # that always run at fixed points in GT's loop —

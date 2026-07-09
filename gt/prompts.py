@@ -208,25 +208,30 @@ def build_system(cwd: str, os_name: str, tools: str,
     return work + pm + prof
 
 
-# Appended to the work prompt in /mode plan — flips "build now" into "plan first".
+# Appended to the work prompt in /mode plan and on a gated low-confidence
+# build — flips "build now" into "plan first".
 PLAN_DIRECTIVE = """
 
 # PLAN MODE IS ACTIVE — plan first, do NOT build yet
-The user has switched you to planning. In this mode you do NOT create or change files \
+This turn is for planning. You do NOT create or change files \
 and you do NOT run commands that modify anything (you MAY read files or list \
 directories to inform the plan). Deliver, in plain prose:
-1. A one- or two-sentence read of what the user actually wants.
+1. A one- or two-sentence read of what the user actually wants — and if the \
+request could reasonably mean different things, say which reading you chose.
 2. The approach and the proposed file/folder structure.
 3. A short numbered list of the concrete steps you will take.
 Then STOP and ask the user to approve or adjust — do not start building. When they \
-approve (e.g. "go", "do it", "build it"), they will switch you to coding mode."""
+approve (e.g. "go", "do it", "build it"), the next turn builds."""
 
 
 def turn_context(user_msg: str, skills_block: str = "",
                  memory_block: str = "", todos_block: str = "",
-                 hook_block: str = "") -> str:
+                 hook_block: str = "", clarify_block: str = "") -> str:
     """Attach the per-turn dynamic context to the user message."""
     parts = []
+    if clarify_block:
+        parts.append("[clarification — GT asked this before starting and the "
+                     f"user answered; honour the answer]\n{clarify_block}")
     if todos_block:
         parts.append("[your task checklist so far — keep it current with "
                      f"write_todos as you finish each step]\n{todos_block}")

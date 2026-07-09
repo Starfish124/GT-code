@@ -1443,6 +1443,205 @@ with _tf.TemporaryDirectory() as _htd2:
           (_hd2 / "hello.txt").exists()
           and any("now run the linter" in o for o in _pllm.observations))
 
+print("\nconfidence-gated planning (weigh the readings before building)")
+from gt.intent import IntentGate, Assessment, AFFIRM
+
+_igcfg = Config.load()
+_ig = IntentGate(None, _igcfg, _quiet)
+check("a build request gates",
+      _ig.should_gate("build me a game", False, "auto", []))
+check("a long spec gates",
+      _ig.should_gate("please process this " + "x" * 300, False, "auto", []))
+check("conversation never gates",
+      not _ig.should_gate("build me a game", True, "auto", []))
+check("forced modes never gate",
+      not _ig.should_gate("build me a game", False, "code", [])
+      and not _ig.should_gate("build me a game", False, "plan", []))
+check("mid-task turns never gate",
+      not _ig.should_gate("build me a game", False, "auto",
+                          [{"task": "x", "status": "doing"}]))
+check("quick work requests skip the gate",
+      not _ig.should_gate("read config.yaml", False, "auto", []))
+check("explicit planning requests skip the gate",
+      not _ig.should_gate("design the architecture for our new service",
+                          False, "auto", []))
+_igoff = Config.load()
+_igoff.data["intent_gate"] = {"enabled": False}
+check("intent_gate.enabled: false disables it",
+      not IntentGate(None, _igoff, _quiet).should_gate(
+          "build me a game", False, "auto", []))
+
+class _GateReplyLLM:
+    last_metrics = None
+    def __init__(self, reply):
+        self.reply = reply
+    def chat(self, role, messages, **kw):
+        if isinstance(self.reply, Exception):
+            raise self.reply
+        return self.reply
+
+_a1 = IntentGate(_GateReplyLLM(
+    "confidence: 92\nreading: single-file flappy bird clone\nquestion: none"),
+    _igcfg, _quiet).assess("build flappy bird", "tiny")
+check("assess parses the three-line format",
+      _a1.confidence == 92 and "flappy" in _a1.reading and _a1.question == "")
+_a2 = IntentGate(_GateReplyLLM(
+    "Confidence: 30%\nReading: could be a CLI or a web app\n"
+    "Question: CLI tool or web app?"), _igcfg, _quiet).assess("x", "tiny")
+check("sloppy capitalisation and % are tolerated",
+      _a2.confidence == 30 and _a2.question.startswith("CLI"))
+check("garbage output fails open (None)",
+      IntentGate(_GateReplyLLM("looks good to me!"), _igcfg, _quiet)
+      .assess("x", "tiny") is None)
+check("a gate LLM failure fails open (None)",
+      IntentGate(_GateReplyLLM(_LLMError("down")), _igcfg, _quiet)
+      .assess("x", "tiny") is None)
+
+_gd = IntentGate(None, _igcfg, _quiet)
+check("decide: high confidence builds",
+      _gd.decide(Assessment(90, "", "")) == "build")
+check("decide: middle confidence plans",
+      _gd.decide(Assessment(60, "", "")) == "plan")
+check("decide: low confidence with a question asks",
+      _gd.decide(Assessment(30, "", "cli or web?")) == "ask")
+check("decide: low confidence without a question plans",
+      _gd.decide(Assessment(30, "", "")) == "plan")
+check("affirmatives match ('go', 'yes please', 'go but use python')",
+      all(AFFIRM.match(s) for s in
+          ("go", "Go ahead", "yes please", "do it", "ok",
+           "go but use python")))
+check("redirections don't match",
+      not any(AFFIRM.match(s) for s in
+              ("no", "make it a website instead", "change the colors",
+               "what about tests?")))
+
+class _IntentLLM:
+    """stream=False = the gate's triage call; stream=True = the turn."""
+    last_metrics = None
+    def __init__(self, gate_reply):
+        self.gate_reply = gate_reply
+        self.gate_calls = 0
+        self.turn_systems = []
+        self.turn_users = []
+    def chat(self, role, messages, **kw):
+        if not kw.get("stream"):
+            self.gate_calls += 1
+            if isinstance(self.gate_reply, Exception):
+                raise self.gate_reply
+            return self.gate_reply
+        self.turn_systems.append(messages[0]["content"])
+        self.turn_users.append(messages[-1]["content"])
+        # Vary the reply per turn or the echo-stall detector fires.
+        reply = f"Planned or built — done (turn {len(self.turn_systems)})."
+        if kw.get("on_token"):
+            kw["on_token"](reply)
+        return reply
+
+def _gate_agent(llm):
+    c = Config.load()
+    return Agent(llm=llm, config=c, memory=_Stub(),
+                 router=Router(llm=None, config=c), console=_quiet,
+                 improver=_Stub(), approve=lambda *a, **k: True,
+                 ask=None)
+
+_hi = _IntentLLM("confidence: 95\nreading: crystal clear\nquestion: none")
+_ha = _gate_agent(_hi)
+_ha.run("build me a snake game in one html file")
+check("high confidence builds immediately (no plan mode)",
+      _hi.gate_calls == 1 and "PLAN MODE" not in _hi.turn_systems[0]
+      and not _ha._pending_plan)
+
+_mid = _IntentLLM("confidence: 60\nreading: some kind of game\nquestion: none")
+_ma = _gate_agent(_mid)
+_ma.run("build me a game")
+check("medium confidence plans first and waits for the go",
+      "PLAN MODE" in _mid.turn_systems[0] and _ma._pending_plan)
+_ma.run("go")
+check("'go' after a gated plan builds — no re-gate, pending cleared",
+      len(_mid.turn_systems) == 2 and "PLAN MODE" not in _mid.turn_systems[1]
+      and not _ma._pending_plan and _mid.gate_calls == 1)
+
+_mid2 = _IntentLLM("confidence: 60\nreading: some kind of game\nquestion: none")
+_ma2 = _gate_agent(_mid2)
+_ma2.run("build me a game")
+_ma2.run("thanks, maybe later")
+check("a redirection lapses the pending plan", not _ma2._pending_plan)
+
+_lo = _IntentLLM("confidence: 30\nreading: unclear deliverable\n"
+                 "question: CLI tool or web app?")
+_asked = []
+_lc = Config.load()
+_la = Agent(llm=_lo, config=_lc, memory=_Stub(),
+            router=Router(llm=None, config=_lc), console=_quiet,
+            improver=_Stub(), approve=lambda *a, **k: True,
+            ask=lambda q: (_asked.append(q) or "web app please"))
+_la.run("build me a converter tool")
+check("low confidence asks exactly ONE question",
+      _asked == ["CLI tool or web app?"])
+check("the answer rides into the same build turn",
+      "web app please" in _lo.turn_users[0]
+      and "clarification" in _lo.turn_users[0]
+      and "PLAN MODE" not in _lo.turn_systems[0])
+
+_dead = _IntentLLM(_LLMError("gate down"))
+_da = _gate_agent(_dead)
+_da.run("build me a game")
+check("gate failure fails open — the build still runs",
+      len(_dead.turn_systems) == 1
+      and "PLAN MODE" not in _dead.turn_systems[0])
+
+class _DisobedientLLM:
+    """Gate says plan; the model tries to write anyway (observed live)."""
+    last_metrics = None
+    def __init__(self):
+        self.calls = 0
+        self.observations = []
+    def chat(self, role, messages, **kw):
+        if not kw.get("stream"):
+            return "confidence: 60\nreading: some game\nquestion: none"
+        self.calls += 1
+        if self.calls > 1:
+            self.observations.append(messages[-1]["content"])
+        reply = ('```json\n{"tool":"write_file","args":'
+                 '{"path":"game.html","content":"<html>"}}\n```'
+                 if self.calls == 1 else "Fine — here is the plan instead.")
+        if kw.get("on_token"):
+            kw["on_token"](reply)
+        return reply
+
+with _tf.TemporaryDirectory() as _ptd:
+    _pd = Path(_ptd).resolve()
+    _dllm2 = _DisobedientLLM()
+    _pa2 = _gate_agent(_dllm2)
+    _pa2.cwd = _pd
+    _pa2.run("build me a game")
+    check("plan turns refuse mutating tools even if the model tries",
+          not (_pd / "game.html").exists()
+          and any("PLAN MODE is active" in o for o in _dllm2.observations))
+    check("read tools still work in plan turns",
+          _pa2._plan_turn is True)
+
+class _PlanProseLLM:
+    """A plan reply announces future work — that must NOT trip a nudge."""
+    last_metrics = None
+    def __init__(self):
+        self.stream_calls = 0
+    def chat(self, role, messages, **kw):
+        if not kw.get("stream"):
+            return "confidence: 60\nreading: some game\nquestion: none"
+        self.stream_calls += 1
+        reply = ("Plan: 1) index.html with a canvas 2) game.js with the "
+                 "loop. I will now create the files once you say go.")
+        if kw.get("on_token"):
+            kw["on_token"](reply)
+        return reply
+
+_ppllm = _PlanProseLLM()
+_ppa = _gate_agent(_ppllm)
+_ppans = _ppa.run("build me a game")
+check("a plan that announces future work is accepted, not nudged",
+      _ppllm.stream_calls == 1 and _ppans and _ppans.startswith("Plan:"))
+
 print("\nstartup banner renders (3D wordmark + author + build)")
 from gt import banner as _banner
 _bc = Console(file=io.StringIO(), force_terminal=False)

@@ -54,6 +54,11 @@ project_memory:
   enabled: true         # load GT.md (project instructions) every work turn
   max_chars: 6000
 
+intent_gate:
+  enabled: true         # weigh a new build request before executing it
+  min_confidence: 75    # >= builds now; below plans first
+  ask_below: 45         # < asks one clarifying question instead
+
 hooks:
   enabled: true         # lifecycle scripts (see repo config.yaml for examples)
   timeout: 30

@@ -287,6 +287,18 @@ system prompt, which stays KV-cached). Runs after your answer, on the
 always-hot model — no swap, no reload. `/compact` runs it on demand and shows
 the summary; degrades to the plain drop when Ollama is unreachable.
 
+**Confidence-gated planning** (`gt/intent.py`). Bias-to-action is right for
+clear requests and wrong for ambiguous ones — the flappy-bird failure was an
+agent executing a request it had misread, at full speed. Before a NEW
+build-shaped task starts, GT spends one small model call weighing the
+plausible **readings** of the request (what was specified vs left to
+defaults) and scoring its confidence in the main one. The score routes
+deterministically: high → build immediately (nothing changes), medium →
+present a plan and wait for your "go", low → ask **one** clarifying
+question, then build. Never fires on chat, quick tasks, mid-task turns, or
+forced `/mode` sessions; fail-open, so the gate can only add care, never
+block work.
+
 **Hooks** (`gt/hooks.py`). Prompts steer the model; hooks guarantee. A hook
 is your own shell command, declared under `hooks:` in `config.yaml`, that GT
 runs deterministically at a fixed lifecycle point: `session_start`,
@@ -335,6 +347,10 @@ subagents:
 hooks:
   enabled: true      # your commands at lifecycle points (see config.yaml)
   timeout: 30        # per-hook kill timer; failures are fail-open
+intent_gate:
+  enabled: true      # weigh a new build request before executing it
+  min_confidence: 75 # >= builds now; below plans first and waits for "go"
+  ask_below: 45      # < asks one clarifying question instead
 web:
   enabled: true      # web_search / web_fetch tools; false = fully offline
 ```

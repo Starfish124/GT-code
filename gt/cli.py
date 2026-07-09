@@ -74,6 +74,9 @@ it lands in this project's GT.md, which GT reads on every turn.
 Anything else is talk or work. Ask a question and GT just answers; ask for a
 build and it goes straight to it — using tools (files, commands, web,
 Excel/PowerPoint/Word) and asking permission before it changes anything.
+An ambiguous build request gets a quick confidence check first: GT presents
+a plan (say "go" to build) or asks one clarifying question instead of
+guessing (tune or disable under intent_gate: in config.yaml).
 """
 
 
