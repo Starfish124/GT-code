@@ -122,6 +122,7 @@ Destructive-looking commands (`rm -rf`, `format`, `del /s`, forced pushes…)
 | `/skills` | List the expert playbooks GT injects per request |
 | `/auto` | Toggle auto-approve (dangerous commands still prompt) |
 | `/permissions` | List standing grants; `/permissions clear` revokes all |
+| `/compact` | Fold the conversation into a rolling session summary (also automatic at context pressure) |
 | `/cd <path>` | Change the working directory GT operates in |
 | `/init` | Explore the project and write its `GT.md` (project memory) |
 | `/index <path>` | Embed a file/folder into memory for RAG |
@@ -276,6 +277,15 @@ exploring the project; `# <note>` appends a rule in one keystroke;
 distills one reusable lesson into memory. Learning by retrieval, not
 fine-tuning — transparent and reversible (`/forget lesson`).
 
+**Auto-compaction** (`gt/agent.py`). Bounded history keeps prefill fast, but
+old turns used to just fall off — the goal and constraints from early in a
+long build vanished with them. Now, when the conversation outgrows
+`max_history_turns`, the resident model distills the oldest exchanges into a
+rolling session summary that rides at the front of the context (never in the
+system prompt, which stays KV-cached). Runs after your answer, on the
+always-hot model — no swap, no reload. `/compact` runs it on demand and shows
+the summary; degrades to the plain drop when Ollama is unreachable.
+
 ---
 
 ## Configuration reference (`config.yaml`)
@@ -291,6 +301,10 @@ memory:
   auto_learn: true   # extract a lesson after each task
   recall_k: 5        # memories pulled into context per turn
   min_score: 0.28    # similarity floor (0..1)
+compaction:
+  enabled: true      # summarize old turns instead of dropping them
+  keep_turns: 5      # exchanges kept verbatim after a compaction
+  max_chars: 1500    # cap on the rolling session summary
 web:
   enabled: true      # web_search / web_fetch tools; false = fully offline
 ```

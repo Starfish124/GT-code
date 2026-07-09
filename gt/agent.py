@@ -216,8 +216,21 @@ class Agent:
         self.max_steps = int(config.agent.get("max_steps", 12))
         # Keep the working history bounded (in entries = 2 * turns) so a long
         # session's prompt — and therefore its prefill time on a CPU box —
-        # doesn't creep up turn after turn. Older turns drop off; /reset clears.
+        # doesn't creep up turn after turn. /reset clears.
         self.max_history = int(config.agent.get("max_history_turns", 10)) * 2
+        # Auto-compaction (Claude Code's fix for failure mode #2, context
+        # collapse): when history outgrows its bound, the oldest exchanges are
+        # DISTILLED into this rolling summary by the resident model instead of
+        # silently dropped — the goal and early decisions survive a long build.
+        # It rides as a message at the FRONT of history (never in the system
+        # prompt, which stays byte-stable and KV-cached). /compact runs it on
+        # demand; /reset clears it.
+        comp_cfg = config.data.get("compaction", {})
+        self.compaction_enabled = bool(comp_cfg.get("enabled", True))
+        self.keep_turns = int(comp_cfg.get("keep_turns",
+                                           max(1, self.max_history // 4)))
+        self.summary_max_chars = int(comp_cfg.get("max_chars", 1500))
+        self.session_summary = ""
 
         # Tools available this session (web tools dropped if web.enabled=false).
         self.tools = {t.name: t for t in active_tools(config)}
@@ -312,9 +325,12 @@ class Agent:
             memory_block, todos_block)
 
         # Working message list for this turn (includes intermediate tool steps).
-        messages = [{"role": "system", "content": system}] + self.history + [
-            {"role": "user", "content": user_content}
-        ]
+        # The session summary (if any) rides between the system prompt and the
+        # verbatim history: the system prompt prefix stays KV-cached, and only
+        # the (much smaller) history region re-prefills after a compaction.
+        messages = ([{"role": "system", "content": system}]
+                    + self._summary_context() + self.history
+                    + [{"role": "user", "content": user_content}])
 
         ctx = Ctx(cwd=self.cwd, memory=self.memory,
                   approve=self.approve, config=self.config, ask=self.ask,
@@ -435,7 +451,7 @@ class Agent:
         if stored:
             self.history.append({"role": "assistant", "content": stored})
         if len(self.history) > self.max_history:
-            self.history = self.history[-self.max_history:]
+            self._autocompact()
 
         # Lightweight log of what the user asked, for the periodic preference
         # analyst (profile.py). Bounded; kept across /reset since it's about the
@@ -494,6 +510,23 @@ class Agent:
         self._seen_skills.clear()
         self._seen_memory.clear()
         self.todos.clear()
+        self.session_summary = ""
+
+    def compact_now(self):
+        """Fold the WHOLE conversation into the session summary (/compact).
+
+        History restarts light — one short summary instead of every turn —
+        but nothing important is forgotten. Returns the new summary, or None
+        if summarizing failed (the conversation is then left untouched).
+        """
+        if not self.history:
+            return self.session_summary or None
+        summary = self._summarize(self.history)
+        if not summary:
+            return None
+        self.session_summary = summary
+        self.history = []
+        return summary
 
     def reload_project_memory(self):
         """(Re-)read the GT.md layers for the current workspace.
@@ -660,6 +693,98 @@ class Agent:
         if _INTENT.search(text):
             return "intent"
         return None
+
+    def _summary_context(self):
+        """The rolling session summary as a context message ('' → none)."""
+        if not self.session_summary:
+            return []
+        return [{"role": "user", "content": (
+            "[context: session summary — the earlier part of this "
+            "conversation, compacted. Treat it as things that already "
+            "happened.]\n" + self.session_summary)}]
+
+    def _autocompact(self):
+        """Fold the oldest exchanges into the rolling session summary.
+
+        The history bound used to just drop old turns — fast, but the goal
+        and decisions from early in a long build vanished with them (failure
+        mode #2, context collapse). Now the resident model distills the
+        overflow before it goes. Runs at the END of a turn (the user already
+        has their answer), at most once every keep_turns exchanges, on the
+        ALWAYS-HOT resident model — no swap, no reload. Degrades to the plain
+        drop when disabled, unreachable, or Ctrl-C'd.
+        """
+        # Clamp what's kept verbatim to half the history bound, so a small
+        # max_history_turns can't leave keep_turns covering the whole window
+        # (overflow would always be empty and compaction would never fire).
+        keep = max(2, min(self.keep_turns * 2, self.max_history // 2))
+        overflow, kept = self.history[:-keep], self.history[-keep:]
+        if not self.compaction_enabled or not overflow:
+            self.history = self.history[-self.max_history:]
+            return
+        self.console.print(f"[dim]· context pressure — compacting "
+                           f"{max(1, len(overflow) // 2)} older exchange(s) "
+                           f"into the session summary (Ctrl-C skips)[/dim]")
+        try:
+            summary = self._summarize(overflow)
+        except KeyboardInterrupt:
+            summary = ""
+        if summary:
+            self.session_summary = summary
+            self.history = kept
+            self.console.print(f"[dim]· session summary updated "
+                               f"({len(summary)} chars) — /compact shows "
+                               f"it[/dim]")
+        else:
+            # Summarizer offline/skipped: fall back to the old behaviour so a
+            # long session still can't bloat the prompt.
+            self.history = self.history[-self.max_history:]
+
+    def _summarizer_role(self):
+        """Summarize on the RESIDENT model — never a bigger one that would
+        evict it from RAM (the reviewer sits on the 3B for the same reason)."""
+        if "tiny" in self.config.models:
+            return "tiny"
+        return self.config.router.get("default", "tiny")
+
+    def _summarize(self, entries):
+        """Distill history entries into a short handoff summary ('' on failure)."""
+        lines = []
+        for m in entries:
+            who = "user" if m["role"] == "user" else "gt"
+            text = m["content"]
+            # History user entries can carry injected [context: ...] blocks —
+            # summarize what the user actually typed.
+            if who == "user":
+                text = text.split("\n\n[user request]\n")[-1]
+            if len(text) > 700:
+                text = text[:700] + "…"
+            lines.append(f"{who}: {text}")
+        prev = self.session_summary or "(none)"
+        messages = [
+            {"role": "system", "content": (
+                "You compress the earlier part of a coding session into a "
+                "short handoff summary, so the assistant can keep working "
+                "without the full transcript. Merge the previous summary "
+                "with the new exchanges. Keep ONLY what still matters going "
+                "forward: the user's goal and key decisions or constraints; "
+                "files created or changed and important commands; what is "
+                "DONE versus still OPEN; anything the user corrected or "
+                "forbade. Drop pleasantries and dead ends. Output plain "
+                "bullet lines only, at most 12, no headings, no preamble.")},
+            {"role": "user", "content": (
+                f"Previous summary:\n{prev}\n\nNew exchanges to fold in:\n"
+                + "\n".join(lines) + "\n\nUpdated summary (bullets only):")},
+        ]
+        try:
+            out = self.llm.chat(self._summarizer_role(), messages,
+                                stream=False, temperature=0.2)
+        except LLMError:
+            return ""
+        out = (out or "").strip()
+        if len(out) > self.summary_max_chars:
+            out = out[:self.summary_max_chars] + "…"
+        return out
 
     def _fit_context(self, messages, keep_recent=2):
         """Keep the message list inside the model's context window.

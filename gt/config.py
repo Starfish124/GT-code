@@ -45,6 +45,11 @@ memory:
   recall_k: 5
   min_score: 0.28
 
+compaction:
+  enabled: true         # summarize old turns instead of dropping them
+  keep_turns: 5
+  max_chars: 1500
+
 project_memory:
   enabled: true         # load GT.md (project instructions) every work turn
   max_chars: 6000

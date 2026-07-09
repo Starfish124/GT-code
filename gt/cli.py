@@ -47,6 +47,8 @@ HELP = """\
   /profile [clear|update]  show what GT has learned about your preferences over
                      time (glass-box); 'update' relearns now, 'clear' wipes it
   /todos             show GT's current task checklist (its plan for a build)
+  /compact           squeeze the conversation into a short session summary now
+                     (GT also does this automatically when history fills up)
   /route             toggle smart auto-routing on/off
   /think             toggle deep thinking (Qwen3 reasoning mode; off = snappy)
   /temp [code [chat]] show or set sampling temperature (code vs conversation)
@@ -193,6 +195,8 @@ class GTShell:
             self._profile(arg)
         elif cmd == "/todos":
             self._todos_cmd()
+        elif cmd == "/compact":
+            self._compact()
         elif cmd == "/route":
             self.router.enabled = not self.router.enabled
             self.console.print(f"auto-routing: [bold]{'on' if self.router.enabled else 'off'}[/bold]")
@@ -432,6 +436,42 @@ class GTShell:
                            f"[dim]({done}/{len(self.agent.todos)} done)[/dim]")
         self.console.print(render_todos(self.agent.todos))
 
+    def _compact(self):
+        """/compact — fold the conversation into the rolling session summary.
+
+        Also shows the current summary when there is nothing new to fold, so
+        it doubles as the glass-box view of what auto-compaction has kept.
+        """
+        ag = self.agent
+        if not ag.history:
+            if ag.session_summary:
+                self._show_summary(ag.session_summary)
+            else:
+                self.console.print("[dim]nothing to compact yet — the "
+                                   "conversation is empty.[/dim]")
+            return
+        n = max(1, len(ag.history) // 2)
+        self.console.print(f"[dim]· compacting {n} exchange(s) on the "
+                           f"resident model…[/dim]")
+        try:
+            summary = ag.compact_now()
+        except KeyboardInterrupt:
+            self.console.print("[dim]· skipped — conversation left "
+                               "untouched.[/dim]")
+            return
+        if not summary:
+            self.console.print("[yellow]couldn't summarize (is Ollama "
+                               "running?) — conversation left "
+                               "untouched.[/yellow]")
+            return
+        self._show_summary(summary)
+
+    def _show_summary(self, summary):
+        self.console.print(f"[bold {PURPLE}]Session summary[/bold {PURPLE}] "
+                           f"[dim](rides in context every turn; /reset "
+                           f"clears it)[/dim]")
+        self.console.print(summary)
+
     def _prompt_str(self):
         """The gt› prompt, tagged with the mode when it isn't auto (gt[code]›)."""
         m = self.agent.mode
@@ -549,7 +589,7 @@ class GTShell:
         # user's actual conversation untouched.
         real_console = self.agent.console
         saved = (list(self.agent.history), set(self.agent._seen_skills),
-                 set(self.agent._seen_memory))
+                 set(self.agent._seen_memory), self.agent.session_summary)
         self.agent.console = Console(file=io.StringIO())
         rows = []
         try:
@@ -564,7 +604,7 @@ class GTShell:
         finally:
             self.agent.console = real_console
             (self.agent.history, self.agent._seen_skills,
-             self.agent._seen_memory) = saved
+             self.agent._seen_memory, self.agent.session_summary) = saved
 
         table = Table(title="per-turn timing")
         table.add_column("turn", style=PURPLE)

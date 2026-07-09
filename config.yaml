@@ -99,6 +99,19 @@ memory:
   recall_k: 5           # how many memories/lessons to pull into context per turn
   min_score: 0.28       # ignore memories below this similarity (0..1)
 
+compaction:
+  enabled: true         # when the conversation outgrows agent.max_history_turns,
+                        # distill the OLDEST exchanges into a rolling session
+                        # summary (on the resident model, after your answer)
+                        # instead of silently dropping them — the goal and early
+                        # decisions survive a long build. /compact runs it now
+                        # and shows the summary; /reset clears it.
+                        # false = old turns just fall off (previous behaviour).
+  keep_turns: 5         # exchanges kept verbatim after a compaction; everything
+                        # older lives on only in the summary.
+  max_chars: 1500       # cap the rolling summary — it is prefilled every turn,
+                        # so short beats complete.
+
 project_memory:
   enabled: true         # load GT.md into every work turn — the project's own
                         # standing instructions (stack, run/test commands,

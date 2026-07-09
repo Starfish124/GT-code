@@ -1072,6 +1072,90 @@ check("agent loads project memory at startup",
       isinstance(_agent.project_memory, str)
       and isinstance(_agent.project_memory_files, list))
 
+print("\nauto-compaction (rolling session summary — failure mode #2)")
+from gt.llm import LLMError as _LLMError
+
+class _SumLLM:
+    """Turn calls (stream=True) answer prose; summarizer calls (stream=False)
+    return a canned summary and record what they were shown."""
+    last_metrics = None
+    def __init__(self, fail_summary=False):
+        self.turns = 0
+        self.fail_summary = fail_summary
+        self.summarize_inputs = []
+        self.turn_messages = None
+    def chat(self, role, messages, **kw):
+        if not kw.get("stream"):
+            if self.fail_summary:
+                raise _LLMError("summarizer down")
+            self.summarize_inputs.append(messages[-1]["content"])
+            return "- goal: build the todo app\n- api.py created, tests OPEN"
+        self.turns += 1
+        self.turn_messages = messages
+        reply = f"answer {self.turns}"
+        if kw.get("on_token"):
+            kw["on_token"](reply)
+        return reply
+
+_ccfg = Config.load()
+_ccfg.agent["max_history_turns"] = 2          # tiny bound -> compaction fires
+_cllm = _SumLLM()
+_cagent = Agent(llm=_cllm, config=_ccfg, memory=_Stub(), router=_Stub(),
+                console=_quiet, improver=_Stub(),
+                approve=lambda *a, **k: True, ask=None)
+check("compaction defaults on with a derived keep_turns",
+      _cagent.compaction_enabled and _cagent.keep_turns >= 1)
+for _i in range(3):
+    _cagent.run(f"please look at question {_i}")
+check("overflow was distilled, not dropped",
+      "todo app" in _cagent.session_summary)
+check("history keeps only the recent exchanges",
+      len(_cagent.history) <= _cagent.max_history)
+check("summarizer saw the dropped exchange",
+      any("question 0" in s for s in _cllm.summarize_inputs))
+_cagent.run("please look at question 3")
+check("summary rides at the front of the next turn's context",
+      "[context: session summary" in _cllm.turn_messages[1]["content"]
+      and "todo app" in _cllm.turn_messages[1]["content"])
+check("system prompt stays byte-stable (no summary inside it)",
+      "todo app" not in _cllm.turn_messages[0]["content"])
+_cagent.run("please look at question 4")     # second compaction fires
+check("rolling merge feeds the previous summary back to the summarizer",
+      "todo app" in _cllm.summarize_inputs[-1])
+_s = _cagent.compact_now()
+check("/compact folds everything and clears the verbatim history",
+      _s and "todo app" in _s and _cagent.history == [])
+check("compact_now with an empty history just returns the summary",
+      _cagent.compact_now() == _s)
+_cagent.todos.append({"task": "x", "status": "pending"})
+_cagent.reset()
+check("reset clears the session summary too", _cagent.session_summary == "")
+
+_fllm = _SumLLM(fail_summary=True)
+_fagent = Agent(llm=_fllm, config=_ccfg, memory=_Stub(), router=_Stub(),
+                console=_quiet, improver=_Stub(),
+                approve=lambda *a, **k: True, ask=None)
+for _i in range(4):
+    _fagent.run(f"please look at question {_i}")
+check("summarizer down -> degrades to the plain drop (bounded, no crash)",
+      _fagent.session_summary == ""
+      and len(_fagent.history) <= _fagent.max_history)
+check("compact_now fails soft when the summarizer is down",
+      _fagent.compact_now() is None and _fagent.history != [])
+
+_dcfg = Config.load()
+_dcfg.agent["max_history_turns"] = 2
+_dcfg.data["compaction"] = {"enabled": False}
+_dllm = _SumLLM()
+_dagent = Agent(llm=_dllm, config=_dcfg, memory=_Stub(), router=_Stub(),
+                console=_quiet, improver=_Stub(),
+                approve=lambda *a, **k: True, ask=None)
+for _i in range(4):
+    _dagent.run(f"please look at question {_i}")
+check("compaction disabled -> old turns just fall off (no summarizer call)",
+      _dagent.session_summary == "" and not _dllm.summarize_inputs
+      and len(_dagent.history) <= _dagent.max_history)
+
 print("\nstartup banner renders (3D wordmark + author + build)")
 from gt import banner as _banner
 _bc = Console(file=io.StringIO(), force_terminal=False)
