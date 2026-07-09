@@ -122,6 +122,7 @@ Destructive-looking commands (`rm -rf`, `format`, `del /s`, forced pushes…)
 | `/skills` | List the expert playbooks GT injects per request |
 | `/auto` | Toggle auto-approve (dangerous commands still prompt) |
 | `/permissions` | List standing grants; `/permissions clear` revokes all |
+| `/hooks` | List the lifecycle hooks configured in `config.yaml` |
 | `/compact` | Fold the conversation into a rolling session summary (also automatic at context pressure) |
 | `/cd <path>` | Change the working directory GT operates in |
 | `/init` | Explore the project and write its `GT.md` (project memory) |
@@ -286,6 +287,17 @@ system prompt, which stays KV-cached). Runs after your answer, on the
 always-hot model — no swap, no reload. `/compact` runs it on demand and shows
 the summary; degrades to the plain drop when Ollama is unreachable.
 
+**Hooks** (`gt/hooks.py`). Prompts steer the model; hooks guarantee. A hook
+is your own shell command, declared under `hooks:` in `config.yaml`, that GT
+runs deterministically at a fixed lifecycle point: `session_start`,
+`session_end`, `user_prompt` (stdout becomes context), `pre_tool` (**exit
+code 2 blocks the tool call** — protect `.env`, enforce team policy),
+`post_tool` (stdout is appended to the result the model sees — auto-lint
+after every write), `turn_end` (log, notify). Each hook gets a JSON payload
+on stdin plus `GT_EVENT`/`GT_TOOL`/`GT_CWD` env vars; broken or hanging
+hooks fail open, so a bad hook can never brick the agent. `/hooks` shows
+what's configured.
+
 **Sub-agents** (`gt/subagent.py`). GT's Task tool: `run_agent` sends a
 research sub-agent to investigate in its **own separate context** — read
 files, search the codebase, browse the web — and only its final report comes
@@ -320,6 +332,9 @@ subagents:
   enabled: true      # run_agent: read-only research in a separate context
   max_steps: 8       # tool calls before the sub-agent must report
   max_report_chars: 3000
+hooks:
+  enabled: true      # your commands at lifecycle points (see config.yaml)
+  timeout: 30        # per-hook kill timer; failures are fail-open
 web:
   enabled: true      # web_search / web_fetch tools; false = fully offline
 ```

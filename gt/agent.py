@@ -17,6 +17,7 @@ from pathlib import Path
 
 from rich.text import Text
 
+from .hooks import Hooks
 from .prompts import build_system, turn_context
 from .skills import load_skills, select, skills_block, SkillIndex
 from .tools import Ctx, active_tools, tool_docs, capability_summary, render_todos
@@ -232,6 +233,10 @@ class Agent:
         self.summary_max_chars = int(comp_cfg.get("max_chars", 1500))
         self.session_summary = ""
 
+        # Deterministic lifecycle hooks (hooks.py): the user's own commands
+        # that ALWAYS run at fixed points — pre_tool can veto a call outright.
+        self.hooks = Hooks(config, console)
+
         # Tools available this session (web tools dropped if web.enabled=false).
         self.tools = {t.name: t for t in active_tools(config)}
         self.tool_docs = tool_docs(self.tools.values())
@@ -325,7 +330,8 @@ class Agent:
         todos_block = render_todos(self.todos) if (self.todos and not conversational) else ""
         user_content = turn_context(
             user_msg, skills_block(picked, self.skills_inject_chars),
-            memory_block, todos_block)
+            memory_block, todos_block,
+            hook_block=self.hooks.user_prompt(user_msg, cwd=self.cwd))
 
         # Working message list for this turn (includes intermediate tool steps).
         # The session summary (if any) rides between the system prompt and the
@@ -466,6 +472,12 @@ class Agent:
                                           else ""))[:200]})
         if len(self.session_log) > 60:
             self.session_log = self.session_log[-60:]
+
+        # turn_end hooks — deterministic per-turn side effects (logging,
+        # notifications). After persist, so the turn is fully settled.
+        self.hooks.fire("turn_end", {
+            "prompt": user_msg, "answer": (final_answer or "")[:2000],
+            "steps": len(trace), "cwd": str(self.cwd)})
 
         # Self-improvement — in the background so the prompt returns NOW
         # instead of making the user wait for the reviewer model. Fire it only
@@ -860,15 +872,41 @@ class Agent:
     def _run_tool(self, call, ctx):
         name = call.get("tool")
         args = call.get("args", {}) or {}
+        # Small models sometimes JSON-encode the args dict as a STRING
+        # ('"args": "{\\"todos\\": ...}"' — observed live on the 3B). Decode
+        # it instead of letting every tool (and hook) choke on a str.
+        if isinstance(args, str):
+            try:
+                parsed = json.loads(args)
+                args = parsed if isinstance(parsed, dict) else {}
+            except ValueError:
+                args = {}
+        elif not isinstance(args, dict):
+            args = {}
+        call["args"] = args      # the digest sees the repaired form too
         tool = self.tools.get(name)
         if not tool:
             self.console.print(f"[red]· unknown tool: {name}[/red]")
             return (f"ERROR: unknown tool '{name}'. Available: "
                     f"{', '.join(self.tools)}")
+        # pre_tool hooks run FIRST — a standing user rule (exit code 2) vetoes
+        # the call before it happens, no matter what the model decided.
+        allowed, why = self.hooks.pre_tool(name, args, cwd=self.cwd)
+        if not allowed:
+            result = (f"DENIED by a pre_tool hook — a standing rule the user "
+                      f"configured, not a one-off refusal: {why}\n"
+                      f"Do NOT retry the same call; adapt or report it.")
+            self._show_step(name, args, result)
+            return result
         try:
             result = tool.run(args, ctx)
         except Exception as e:
             result = f"ERROR running {name}: {e}"
+        # post_tool hooks can append to what the model sees (lint output,
+        # a reminder, a build status) — deterministic feedback, every time.
+        extra = self.hooks.post_tool(name, args, result, cwd=self.cwd)
+        if extra:
+            result = f"{result}\n[post_tool hook output]\n{extra}"
         self._show_step(name, args, result)
         return result
 

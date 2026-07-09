@@ -223,7 +223,8 @@ approve (e.g. "go", "do it", "build it"), they will switch you to coding mode.""
 
 
 def turn_context(user_msg: str, skills_block: str = "",
-                 memory_block: str = "", todos_block: str = "") -> str:
+                 memory_block: str = "", todos_block: str = "",
+                 hook_block: str = "") -> str:
     """Attach the per-turn dynamic context to the user message."""
     parts = []
     if todos_block:
@@ -233,6 +234,9 @@ def turn_context(user_msg: str, skills_block: str = "",
         parts.append(f"[context: expert playbooks for this request]\n{skills_block}")
     if memory_block:
         parts.append(f"[context: relevant memory & learned lessons]\n{memory_block}")
+    if hook_block:
+        parts.append("[context: injected by the user's user_prompt hook]"
+                     f"\n{hook_block}")
     if not parts:
         return user_msg
     return "\n\n".join(parts) + f"\n\n[user request]\n{user_msg}"

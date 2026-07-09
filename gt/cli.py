@@ -56,6 +56,8 @@ HELP = """\
                      <path|git-url>' bulk-imports an Agent-Skills library
   /auto              toggle auto-approve (skip y/n prompts for writes & commands)
   /permissions       show granted permissions; '/permissions clear' revokes all
+  /hooks             list the lifecycle hooks configured in config.yaml (your
+                     own commands that always run: pre_tool can block a call)
   /cd <path>         change the workspace directory GT operates in
   /init              explore this project and write its GT.md (project memory)
   /index <path>      embed a file or folder into memory for RAG
@@ -134,6 +136,9 @@ class GTShell:
         if self.config.data.get("profile", {}).get("enabled", True):
             self.agent.profile_summary = self.profiler.summary()
         self._warmup(self.config.router.get("default", "tiny"))
+        self.agent.hooks.fire("session_start",
+                              {"cwd": str(self.agent.cwd),
+                               "version": __version__})
         self.console.print(f"\n[dim]Try:[/dim] [{PURPLE}]what can you do?[/{PURPLE}]"
                            f"   [dim]·[/dim]   [{PURPLE}]build me a todo app[/{PURPLE}]"
                            f"   [dim]·[/dim]   [{PURPLE}]/benchmark[/{PURPLE}]")
@@ -208,6 +213,8 @@ class GTShell:
                                   if self.perms.auto_approve else ""))
         elif cmd == "/permissions":
             self._permissions(arg)
+        elif cmd == "/hooks":
+            self._hooks_cmd()
         elif cmd == "/think":
             perf = self.config.performance
             perf["thinking"] = not perf.get("thinking", False)
@@ -381,6 +388,38 @@ class GTShell:
                            "([dim]/permissions clear to revoke[/dim])")
         for g in grants:
             self.console.print(f"  • {g}")
+
+    def _hooks_cmd(self):
+        """/hooks — the configured lifecycle hooks (glass-box)."""
+        hooks = self.agent.hooks
+        entries = hooks.describe()
+        state = "on" if hooks.enabled else "OFF (hooks.enabled: false)"
+        self.console.print(f"[bold]Hooks[/bold] — {state} · "
+                           f"[dim]your own commands, run deterministically at "
+                           f"fixed points; configure under hooks: in "
+                           f"config.yaml[/dim]")
+        if not entries:
+            self.console.print(
+                "[dim]none configured. Example — protect .env files:\n"
+                "  hooks:\n"
+                "    pre_tool:\n"
+                "      - match: \"write_file|edit_file\"\n"
+                "        command: \"python scripts/protect_env.py\"\n"
+                "A pre_tool hook that exits with code 2 BLOCKS the call; "
+                "post_tool stdout is shown to the model; user_prompt stdout "
+                "becomes context. Events: session_start, session_end, "
+                "user_prompt, pre_tool, post_tool, turn_end.[/dim]")
+            return
+        table = Table()
+        table.add_column("event", style="cyan")
+        table.add_column("match", style="dim")
+        table.add_column("command")
+        for ev, match, command in entries:
+            table.add_row(ev, match or "(all)", command)
+        self.console.print(table)
+        self.console.print("[dim]exit 2 from pre_tool blocks the call · other "
+                           "failures are ignored (fail-open) · each hook gets "
+                           "JSON on stdin + GT_EVENT/GT_TOOL/GT_CWD[/dim]")
 
     def _doctor(self):
         hw = machine.probe()
@@ -702,6 +741,12 @@ class GTShell:
                 self._run_profile_analysis(manual=False)
             except Exception:
                 pass   # never let profiling block a clean exit
+        try:
+            self.agent.hooks.fire("session_end",
+                                  {"cwd": str(self.agent.cwd),
+                                   "turns": len(self.agent.session_log)})
+        except Exception:
+            pass       # a broken hook must never block a clean exit
 
     def _change_dir(self, arg):
         if not arg:

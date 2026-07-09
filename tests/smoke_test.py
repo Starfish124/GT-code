@@ -1287,6 +1287,162 @@ check("the sub-agent got the brief (plus the seeded listing) in a fresh context"
 check("the turn digest remembers the delegation",
       "run_agent(map the gt package)" in _iagent.history[-1]["content"])
 
+print("\nhooks (deterministic lifecycle scripts — guarantees, not suggestions)")
+import os as _os
+import sys as _hsys
+from gt.hooks import Hooks
+
+_hnone = Hooks(Config.load(), _quiet)
+check("no hooks configured -> pre_tool allows",
+      _hnone.pre_tool("write_file", {}, cwd=Path(".")) == (True, ""))
+check("no hooks -> post_tool adds nothing",
+      _hnone.post_tool("write_file", {}, "ok", cwd=Path(".")) == "")
+
+_hbcfg = Config.load()
+_hbcfg.data["hooks"] = {"pre_tool": [
+    {"match": "write_file|edit_file",
+     "command": "echo env files are protected && exit 2"}]}
+_hb = Hooks(_hbcfg, _quiet)
+_allowed, _why = _hb.pre_tool("write_file", {"path": ".env"}, cwd=Path("."))
+check("exit 2 blocks the call and returns the hook's message",
+      _allowed is False and "protected" in _why)
+check("a non-matching tool is untouched",
+      _hb.pre_tool("read_file", {}, cwd=Path("."))[0] is True)
+
+_hwcfg = Config.load()
+_hwcfg.data["hooks"] = {"pre_tool": [{"command": "exit 1"}]}
+check("other non-zero exits fail OPEN (warn, allow)",
+      Hooks(_hwcfg, _quiet).pre_tool("write_file", {}, cwd=Path("."))[0] is True)
+
+_hpcfg = Config.load()
+_hpcfg.data["hooks"] = {"post_tool": [
+    {"match": "write_file", "command": "echo linted ok"}]}
+_hp = Hooks(_hpcfg, _quiet)
+check("post_tool stdout is appended for the model",
+      "linted ok" in _hp.post_tool("write_file", {}, "wrote it", cwd=Path(".")))
+check("post_tool skips other tools",
+      _hp.post_tool("read_file", {}, "x", cwd=Path(".")) == "")
+
+_pyq = f'"{_hsys.executable}"'
+_hjcfg = Config.load()
+_hjcfg.data["hooks"] = {"post_tool": [
+    {"command": _pyq + " -c \"import sys,json;print(json.load(sys.stdin)['tool'])\""}]}
+check("hooks receive the JSON payload on stdin",
+      "write_file" in Hooks(_hjcfg, _quiet).post_tool(
+          "write_file", {}, "ok", cwd=Path(".")))
+
+_envcmd = "echo %GT_TOOL%" if _os.name == "nt" else "echo $GT_TOOL"
+_hecfg = Config.load()
+_hecfg.data["hooks"] = {"post_tool": [{"command": _envcmd}]}
+check("hooks get the GT_* environment variables",
+      "write_file" in Hooks(_hecfg, _quiet).post_tool(
+          "write_file", {}, "ok", cwd=Path(".")))
+
+_hucfg = Config.load()
+_hucfg.data["hooks"] = {"user_prompt": [{"command": "echo remember the deadline"}]}
+check("user_prompt hook stdout becomes context",
+      "remember the deadline" in Hooks(_hucfg, _quiet).user_prompt(
+          "hi", cwd=Path(".")))
+check("turn_context carries the hook block",
+      "HOOKCTX" in turn_context("do it", hook_block="HOOKCTX"))
+
+_hdcfg = Config.load()
+_hdcfg.data["hooks"] = {"enabled": False,
+                        "pre_tool": [{"command": "echo no && exit 2"}]}
+check("hooks.enabled: false disables everything",
+      Hooks(_hdcfg, _quiet).pre_tool("write_file", {}, cwd=Path("."))[0] is True)
+
+_htcfg = Config.load()
+_htcfg.data["hooks"] = {"pre_tool": [
+    {"command": _pyq + " -c \"import time;time.sleep(3)\"", "timeout": 1}]}
+check("a hanging hook times out and fails open",
+      Hooks(_htcfg, _quiet).pre_tool("write_file", {}, cwd=Path("."))[0] is True)
+
+check("describe lists events for /hooks",
+      ("pre_tool", "write_file|edit_file",
+       "echo env files are protected && exit 2") in _hb.describe())
+
+# The 3B sometimes JSON-encodes args as a STRING — must repair, never crash.
+_str_llm_calls = []
+class _StrArgsLLM:
+    last_metrics = None
+    def __init__(self):
+        self.calls = 0
+    def chat(self, role, messages, **kw):
+        self.calls += 1
+        reply = ('```json\n{"tool":"write_todos","args":'
+                 '"{\\"todos\\": [{\\"task\\": \\"x\\", '
+                 '\\"status\\": \\"doing\\"}]}"}\n```'
+                 if self.calls == 1 else "Checklist written.")
+        if kw.get("on_token"):
+            kw["on_token"](reply)
+        return reply
+_sagent2 = Agent(llm=_StrArgsLLM(), config=Config.load(), memory=_Stub(),
+                 router=_Stub(), console=_quiet, improver=_Stub(),
+                 approve=lambda *a, **k: True, ask=None)
+_sagent2.run("plan the work")
+check("string-encoded args are repaired instead of crashing",
+      _sagent2.todos == [{"task": "x", "status": "doing"}])
+
+class _HookLLM:
+    last_metrics = None
+    def __init__(self):
+        self.calls = 0
+    def chat(self, role, messages, **kw):
+        self.calls += 1
+        reply = ('```json\n{"tool":"write_file","args":'
+                 '{"path":"hello.txt","content":"hi"}}\n```'
+                 if self.calls == 1
+                 else "Understood — that file is protected by your rule.")
+        if kw.get("on_token"):
+            kw["on_token"](reply)
+        return reply
+
+with _tf.TemporaryDirectory() as _htd:
+    _hd = Path(_htd).resolve()
+    _hacfg = Config.load()
+    _hacfg.data["hooks"] = {"pre_tool": [
+        {"match": "write_file", "command": "echo no writes here && exit 2"}]}
+    _hagent = Agent(llm=_HookLLM(), config=_hacfg, memory=_Stub(),
+                    router=_Stub(), console=_quiet, improver=_Stub(),
+                    approve=lambda *a, **k: True, ask=None)
+    _hagent.cwd = _hd
+    _hagent.run("write hello.txt for me")
+    check("a pre_tool hook stops the agent's tool call cold",
+          not (_hd / "hello.txt").exists()
+          and "DENIED by a pre_tool hook"
+          in _hagent.history[-1]["content"])
+
+with _tf.TemporaryDirectory() as _htd2:
+    _hd2 = Path(_htd2).resolve()
+    _pacfg = Config.load()
+    _pacfg.data["hooks"] = {"post_tool": [
+        {"match": "write_file", "command": "echo now run the linter"}]}
+    class _PostLLM:
+        last_metrics = None
+        def __init__(self):
+            self.calls = 0
+            self.observations = []
+        def chat(self, role, messages, **kw):
+            self.calls += 1
+            if self.calls > 1:
+                self.observations.append(messages[-1]["content"])
+            reply = ('```json\n{"tool":"write_file","args":'
+                     '{"path":"hello.txt","content":"hi"}}\n```'
+                     if self.calls == 1 else "Written and noted.")
+            if kw.get("on_token"):
+                kw["on_token"](reply)
+            return reply
+    _pllm = _PostLLM()
+    _pagent = Agent(llm=_pllm, config=_pacfg, memory=_Stub(),
+                    router=_Stub(), console=_quiet, improver=_Stub(),
+                    approve=lambda *a, **k: True, ask=None)
+    _pagent.cwd = _hd2
+    _pagent.run("write hello.txt for me")
+    check("post_tool hook output reaches the model with the tool result",
+          (_hd2 / "hello.txt").exists()
+          and any("now run the linter" in o for o in _pllm.observations))
+
 print("\nstartup banner renders (3D wordmark + author + build)")
 from gt import banner as _banner
 _bc = Console(file=io.StringIO(), force_terminal=False)

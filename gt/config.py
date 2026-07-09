@@ -54,6 +54,10 @@ project_memory:
   enabled: true         # load GT.md (project instructions) every work turn
   max_chars: 6000
 
+hooks:
+  enabled: true         # lifecycle scripts (see repo config.yaml for examples)
+  timeout: 30
+
 subagents:
   enabled: true         # run_agent: read-only research in a separate context
   max_steps: 8

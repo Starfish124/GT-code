@@ -137,6 +137,31 @@ profile:
   min_turns: 4          # skip analysis for a session shorter than this
   max_observations: 8   # cap how many preferences the profile holds
 
+hooks:
+  enabled: true         # deterministic lifecycle scripts: YOUR shell commands
+                        # that always run at fixed points in GT's loop —
+                        # guarantees, where prompts are only suggestions.
+                        # Inspect what's configured with /hooks.
+  timeout: 30           # seconds per hook before it's killed (fail-open)
+  # Each event takes a list of {match, command, timeout} entries. `match` is
+  # a regex on the tool name (pre_tool/post_tool only; omitted = every tool).
+  # Every hook gets a JSON payload on stdin plus GT_EVENT / GT_TOOL / GT_CWD
+  # env vars. Exit 0 = fine; exit 2 from pre_tool BLOCKS the tool call and
+  # the model is told why; any other failure is warned about and ignored.
+  #
+  # pre_tool:                   # BEFORE a tool call — can veto it
+  #   - match: "write_file|edit_file"
+  #     command: "python scripts/protect_env.py"   # exit 2 = block
+  # post_tool:                  # AFTER — stdout is appended to the result
+  #   - match: "write_file"
+  #     command: "ruff check --quiet . || echo lint problems, fix them"
+  # user_prompt:                # stdout becomes [context] on your message
+  #   - command: "python scripts/inject_sprint_goals.py"
+  # turn_end:                   # after each final answer (log, notify)
+  #   - command: "python scripts/log_turn.py"
+  # session_start:              # when GT launches
+  # session_end:                # when you quit
+
 subagents:
   enabled: true         # give GT a run_agent tool: a READ-ONLY research
                         # sub-agent (read/list/search/recall/web) that works in
