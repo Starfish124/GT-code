@@ -133,9 +133,10 @@ check("long text splits into overlapping chunks", len(chunks) == 3)
 check("empty text -> no chunks", chunk_text("") == [])
 
 print("\ntool registry + docs")
-check("all 15 tools registered", len(REGISTRY) == 15)
+check("all 16 tools registered", len(REGISTRY) == 16)
 check("process tools registered",
       {"check_process", "stop_process"} <= set(REGISTRY))
+check("write_todos (task checklist) registered", "write_todos" in REGISTRY)
 check("tool_docs mentions run_command", "run_command" in tool_docs())
 check("tool_docs mentions web_search", "web_search" in tool_docs())
 check("office tools registered",
@@ -180,6 +181,28 @@ check("approval denial blocks a write",
       "DENIED" in WriteFile().run(
           {"path": "no.txt", "content": "x"},
           Ctx(cwd=tmp, memory=None, approve=lambda *_, **__: False, config=cfg)))
+
+print("\nwrite_todos — the external task checklist (anti-flappy-bird)")
+from gt.tools import WriteTodos, render_todos
+_tctx = Ctx(cwd=tmp, memory=None, approve=lambda *_, **__: True, config=cfg, todos=[])
+_tr = WriteTodos().run({"todos": [
+    {"task": "scaffold the game file", "status": "done"},
+    {"task": "add the game loop", "status": "doing"},
+    {"task": "open it in the browser", "status": "pending"}]}, _tctx)
+check("write_todos replaces the shared checklist in place", len(_tctx.todos) == 3)
+check("write_todos reports progress and the current item",
+      "1/3 done" in _tr and "add the game loop" in _tr)
+check("write_todos coerces bare strings to pending items",
+      WriteTodos().run({"todos": ["just do the thing"]}, _tctx)
+      and _tctx.todos[0]["status"] == "pending")
+check("write_todos normalises an unknown status to pending",
+      WriteTodos().run({"todos": [{"task": "x", "status": "banana"}]}, _tctx)
+      and _tctx.todos[0]["status"] == "pending")
+check("write_todos rejects a non-list", "ERROR" in WriteTodos().run(
+      {"todos": "nope"}, _tctx))
+check("render_todos shows a checkbox per item",
+      "[x]" in render_todos([{"task": "a", "status": "done"}])
+      and "[ ]" in render_todos([{"task": "b", "status": "pending"}]))
 
 print("\nask_user tool")
 from gt.tools import AskUser

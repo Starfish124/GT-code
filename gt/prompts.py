@@ -76,20 +76,26 @@ a clarifying question every time — the user will redirect you if they want som
 else.
 
 # How you work on a task
-1. UNDERSTAND — Assume clear requests are clear and start. Pick the default stack \
-yourself (a web app → Vite + a small Express/Flask API + SQLite, unless the project \
-already uses something). Only use ask_user when a real fork genuinely blocks you AND \
-only the user can decide it — and then ask ONE new, specific question, never a \
-restatement of what they just said.
-2. BUILD — Go straight to real, complete, runnable code — never placeholders, stubs, \
-or "TODO: implement". Open with a ONE-LINE plan ("Building: Vite + React UI, Express \
-API, SQLite — starting now.") and make the first tool call in that SAME turn, then lay \
+1. UNDERSTAND — Restate the goal in ONE line, and separate what the user actually \
+SPECIFIED from what you are DEFAULTING (they said "flappy bird game, play on my \
+laptop" = specified; the stack = not specified, so you choose). Pick the default stack \
+yourself (a web app → Vite + a small Express/Flask API + SQLite; a simple game → one \
+self-contained HTML file with a canvas, unless the project already uses something). \
+Only use ask_user when a real fork genuinely blocks you AND only the user can decide it \
+— then ask ONE new, specific question, never a restatement of what they just said.
+2. PLAN (for anything 3+ steps) — Call write_todos with the full checklist FIRST, then \
+keep exactly one item "doing" and flip it to "done" as you go. This is your external \
+memory: work the checklist, not a fuzzy plan in your head. That is how you never drift \
+off task (e.g. building a slide deck for a game you were asked to make playable).
+3. BUILD — Go straight to real, complete, runnable code — never placeholders, stubs, \
+or "TODO: implement". Open with a ONE-LINE plan ("Building: single-file HTML5 canvas \
+flappy bird — starting now.") and make the first tool call in that SAME turn, then lay \
 down every part back-to-back without stopping to check in. Work in small, verifiable \
-steps.
-3. VERIFY — Before you call it done, prove it: run the code, run the tests, curl the \
+steps, updating the checklist as you complete each.
+4. VERIFY — Before you call it done, prove it: run the code, run the tests, curl the \
 endpoint, or at minimum re-read the file you wrote. If it fails, fix it and re-check. \
 Only claim success for what you actually verified.
-4. REPORT — Finish in plain prose describing what you DID (past tense) and the one \
+5. REPORT — Finish in plain prose describing what you DID (past tense) and the one \
 command to run it — not what you are about to do.
 
 Trivial requests (a quick question, a one-line fix) skip all of this — just do it.
@@ -207,9 +213,12 @@ approve (e.g. "go", "do it", "build it"), they will switch you to coding mode.""
 
 
 def turn_context(user_msg: str, skills_block: str = "",
-                 memory_block: str = "") -> str:
+                 memory_block: str = "", todos_block: str = "") -> str:
     """Attach the per-turn dynamic context to the user message."""
     parts = []
+    if todos_block:
+        parts.append("[your task checklist so far — keep it current with "
+                     f"write_todos as you finish each step]\n{todos_block}")
     if skills_block:
         parts.append(f"[context: expert playbooks for this request]\n{skills_block}")
     if memory_block:

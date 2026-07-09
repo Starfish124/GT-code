@@ -46,6 +46,7 @@ HELP = """\
   /benchmark         time a standard set of turns on THIS machine (shareable)
   /profile [clear|update]  show what GT has learned about your preferences over
                      time (glass-box); 'update' relearns now, 'clear' wipes it
+  /todos             show GT's current task checklist (its plan for a build)
   /route             toggle smart auto-routing on/off
   /think             toggle deep thinking (Qwen3 reasoning mode; off = snappy)
   /temp [code [chat]] show or set sampling temperature (code vs conversation)
@@ -182,6 +183,8 @@ class GTShell:
             self._benchmark()
         elif cmd == "/profile":
             self._profile(arg)
+        elif cmd == "/todos":
+            self._todos_cmd()
         elif cmd == "/route":
             self.router.enabled = not self.router.enabled
             self.console.print(f"auto-routing: [bold]{'on' if self.router.enabled else 'off'}[/bold]")
@@ -406,6 +409,18 @@ class GTShell:
                 table.add_row(f"[red]{e}[/red]")
             self.console.print(table)
         self.console.print("[dim]Copy the exact ids into config.yaml under models:[/dim]")
+
+    def _todos_cmd(self):
+        """/todos — show GT's current task checklist (glass-box)."""
+        from .tools import render_todos
+        if not self.agent.todos:
+            self.console.print("[dim]no active checklist — GT writes one when it "
+                               "takes on a multi-step task.[/dim]")
+            return
+        done = sum(1 for t in self.agent.todos if t["status"] == "done")
+        self.console.print(f"[bold {PURPLE}]Task checklist[/bold {PURPLE}] "
+                           f"[dim]({done}/{len(self.agent.todos)} done)[/dim]")
+        self.console.print(render_todos(self.agent.todos))
 
     def _prompt_str(self):
         """The gt› prompt, tagged with the mode when it isn't auto (gt[code]›)."""

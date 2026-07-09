@@ -511,6 +511,54 @@ class AskUser(Tool):
 
 
 # --------------------------------------------------------------------------- #
+#  Task tracking — the model's external memory (Claude Code's TodoWrite)
+# --------------------------------------------------------------------------- #
+
+class WriteTodos(Tool):
+    name = "write_todos"
+    description = (
+        "Track a multi-step task as a checklist so you never lose the plan "
+        "half-way through. Use it for ANY task of ~3+ steps: write the whole "
+        "plan first, then keep exactly ONE item 'doing' as you work and flip it "
+        "to 'done' before starting the next. Always pass the FULL list — it "
+        "replaces the previous one. This is your external memory; it survives "
+        "even if the conversation is compacted, so consult and update it instead "
+        "of trying to hold every step in your head.")
+    args = {"todos": 'List of {"task": <short text>, "status": '
+                     '"pending"|"doing"|"done"}.'}
+
+    _STATUS = {"pending", "doing", "done"}
+
+    def run(self, args, ctx):
+        raw = args.get("todos")
+        if not isinstance(raw, list):
+            return ("ERROR: 'todos' must be a JSON list of "
+                    '{"task": ..., "status": ...} objects.')
+        items = []
+        for t in raw:
+            if isinstance(t, str) and t.strip():
+                items.append({"task": t.strip()[:200], "status": "pending"})
+            elif isinstance(t, dict) and str(t.get("task", "")).strip():
+                status = str(t.get("status", "pending")).lower()
+                items.append({"task": str(t["task"]).strip()[:200],
+                              "status": status if status in self._STATUS
+                              else "pending"})
+        if not items:
+            return "ERROR: no valid todos in the list."
+        ctx.todos[:] = items          # replace in place so the agent's list updates
+        done = sum(1 for t in items if t["status"] == "done")
+        doing = next((t["task"] for t in items if t["status"] == "doing"), None)
+        tail = f" · now: {doing}" if doing else ""
+        return f"OK: {done}/{len(items)} done{tail}."
+
+
+def render_todos(todos) -> str:
+    """A compact checklist for the user AND for re-injection into context."""
+    mark = {"done": "[x]", "doing": "[~]", "pending": "[ ]"}
+    return "\n".join(f"  {mark.get(t['status'], '[ ]')} {t['task']}" for t in todos)
+
+
+# --------------------------------------------------------------------------- #
 #  Memory tool
 # --------------------------------------------------------------------------- #
 
@@ -648,7 +696,7 @@ class WebFetch(Tool):
 ALL_TOOLS = [
     ReadFile(), WriteFile(), EditFile(), ListDir(),
     SearchFiles(), RunCommand(), CheckProcess(), StopProcess(),
-    Recall(), AskUser(), WebSearch(), WebFetch(),
+    WriteTodos(), Recall(), AskUser(), WebSearch(), WebFetch(),
 ] + OFFICE_TOOLS
 REGISTRY = {t.name: t for t in ALL_TOOLS}
 

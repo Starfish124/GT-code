@@ -19,7 +19,7 @@ from rich.text import Text
 
 from .prompts import build_system, turn_context
 from .skills import load_skills, select, skills_block, SkillIndex
-from .tools import Ctx, active_tools, tool_docs, capability_summary
+from .tools import Ctx, active_tools, tool_docs, capability_summary, render_todos
 from .ui import streaming_markdown
 from .llm import LLMError
 from .theme import PURPLE
@@ -200,6 +200,10 @@ class Agent:
         # and a lightweight per-session request log the analyst reads later.
         self.profile_summary = ""
         self.session_log = []      # [{"user", "outcome"}]
+        # The write_todos checklist — the model's external memory for a
+        # multi-step task. Persists across turns (survives "continue"); /reset
+        # or a genuinely new task clears it.
+        self.todos = []
         self.max_steps = int(config.agent.get("max_steps", 12))
         # Keep the working history bounded (in entries = 2 * turns) so a long
         # session's prompt — and therefore its prefill time on a CPU box —
@@ -289,8 +293,13 @@ class Agent:
                               tools=self.tool_docs,
                               capabilities=self.capabilities, mode=prompt_mode,
                               profile=self.profile_summary)
+        # Re-inject the current checklist on work turns so the model re-reads
+        # its plan every turn (this is the "external memory" that survives across
+        # 'continue' and any compaction — the flappy-bird fix).
+        todos_block = render_todos(self.todos) if (self.todos and not conversational) else ""
         user_content = turn_context(
-            user_msg, skills_block(picked, self.skills_inject_chars), memory_block)
+            user_msg, skills_block(picked, self.skills_inject_chars),
+            memory_block, todos_block)
 
         # Working message list for this turn (includes intermediate tool steps).
         messages = [{"role": "system", "content": system}] + self.history + [
@@ -299,7 +308,7 @@ class Agent:
 
         ctx = Ctx(cwd=self.cwd, memory=self.memory,
                   approve=self.approve, config=self.config, ask=self.ask,
-                  user_msg=user_msg)
+                  user_msg=user_msg, todos=self.todos)
 
         model_id = self.config.model_for(role)["model"]
         final_answer = None
@@ -307,6 +316,7 @@ class Agent:
         compact_warned = False
         interrupted = False
         nudged = set()             # stall kinds already nudged this turn
+        todo_reminded = bool(self.todos)  # already has a plan → no reminder
         try:
             for step in range(1, self.max_steps + 1):
                 if self._fit_context(messages) and not compact_warned:
@@ -357,6 +367,20 @@ class Agent:
                 observation = self._run_tool(call, ctx)
                 trace.append(digest_line(call["tool"], call.get("args") or {},
                                          observation))
+
+                # Claude-Code-style system-reminder: a multi-step task with no
+                # checklist is how the model loses the plan (it made a PowerPoint
+                # for a game). Nudge it once to externalise the plan with
+                # write_todos so it works the task, not its own confusion.
+                if (not conversational and not self.todos and step >= 3
+                        and not todo_reminded):
+                    todo_reminded = True
+                    messages.append({"role": "user", "content": (
+                        "[system-reminder] You are several steps into a "
+                        "multi-step task with no checklist. Call write_todos now "
+                        "with the FULL plan, then work through it one item at a "
+                        "time — do not try to hold the whole plan in your head.")})
+
                 # Cap what goes back into context — huge tool outputs slow
                 # every later step's prefill without adding much signal.
                 if len(observation) > 6000:
@@ -459,6 +483,7 @@ class Agent:
         self.history.clear()
         self._seen_skills.clear()
         self._seen_memory.clear()
+        self.todos.clear()
 
     def reload_skills(self):
         """Re-scan skill dirs and rebuild the semantic index (after an import)."""
@@ -683,6 +708,12 @@ class Agent:
         few-line result. File CONTENTS (read_file, write previews) are shown as
         a size, never dumped — that noise is exactly what made GT feel cluttered.
         """
+        # The checklist gets its own tidy render — it's the plan, show it whole.
+        if name == "write_todos" and self.todos:
+            self.console.print(f"[bold {PURPLE}]> write_todos[/bold {PURPLE}]")
+            self.console.print(Text(render_todos(self.todos), style="dim"))
+            return
+
         target = next((str(args.get(k)) for k in self._STEP_TARGET
                        if args.get(k)), "")
         if len(target) > 60:
