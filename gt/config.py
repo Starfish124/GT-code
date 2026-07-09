@@ -45,6 +45,10 @@ memory:
   recall_k: 5
   min_score: 0.28
 
+project_memory:
+  enabled: true         # load GT.md (project instructions) every work turn
+  max_chars: 6000
+
 skills:
   enabled: true
   max: 2

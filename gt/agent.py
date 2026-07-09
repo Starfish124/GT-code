@@ -204,6 +204,15 @@ class Agent:
         # multi-step task. Persists across turns (survives "continue"); /reset
         # or a genuinely new task clears it.
         self.todos = []
+        # The GT.md project-memory layer (see project_memory.py): loaded once
+        # here, re-loaded on /cd, /init, /memory reload or a '# note' — never
+        # per turn, so the work prompt stays byte-stable for the KV cache.
+        pm_cfg = config.data.get("project_memory", {})
+        self.pm_enabled = bool(pm_cfg.get("enabled", True))
+        self.pm_max_chars = int(pm_cfg.get("max_chars", 6000))
+        self.project_memory = ""
+        self.project_memory_files = []
+        self.reload_project_memory()
         self.max_steps = int(config.agent.get("max_steps", 12))
         # Keep the working history bounded (in entries = 2 * turns) so a long
         # session's prompt — and therefore its prefill time on a CPU box —
@@ -292,7 +301,8 @@ class Agent:
         system = build_system(cwd=str(self.cwd), os_name=platform.system(),
                               tools=self.tool_docs,
                               capabilities=self.capabilities, mode=prompt_mode,
-                              profile=self.profile_summary)
+                              profile=self.profile_summary,
+                              project_memory=self.project_memory)
         # Re-inject the current checklist on work turns so the model re-reads
         # its plan every turn (this is the "external memory" that survives across
         # 'continue' and any compaction — the flappy-bird fix).
@@ -484,6 +494,20 @@ class Agent:
         self._seen_skills.clear()
         self._seen_memory.clear()
         self.todos.clear()
+
+    def reload_project_memory(self):
+        """(Re-)read the GT.md layers for the current workspace.
+
+        Called at startup and whenever they could have changed (/cd, /init,
+        /memory reload, a '# note') — never per turn. Returns the files loaded.
+        """
+        if not self.pm_enabled:
+            self.project_memory, self.project_memory_files = "", []
+            return []
+        from .project_memory import load
+        self.project_memory, self.project_memory_files = load(
+            self.cwd, self.pm_max_chars)
+        return self.project_memory_files
 
     def reload_skills(self):
         """Re-scan skill dirs and rebuild the semantic index (after an import)."""

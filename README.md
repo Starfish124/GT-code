@@ -123,11 +123,13 @@ Destructive-looking commands (`rm -rf`, `format`, `del /s`, forced pushes…)
 | `/auto` | Toggle auto-approve (dangerous commands still prompt) |
 | `/permissions` | List standing grants; `/permissions clear` revokes all |
 | `/cd <path>` | Change the working directory GT operates in |
+| `/init` | Explore the project and write its `GT.md` (project memory) |
 | `/index <path>` | Embed a file/folder into memory for RAG |
 | `/remember <text>` | Save a note to long-term memory |
 | `/lessons` | Show lessons GT has learned about itself |
-| `/memory` | Memory stats |
+| `/memory [reload]` | Memory stats + the `GT.md` files loaded into context |
 | `/forget <note\|lesson\|doc\|all>` | Clear memory |
+| `# <note>` | Jot a standing note into the project's `GT.md` |
 | `/reset` | Clear the current conversation |
 | `/quit` | Exit |
 
@@ -260,6 +262,15 @@ paragraphs, bullet lists). All pure-Python, Windows-friendly wheels.
 **Memory / RAG** (`gt/memory.py`). `nomic-embed-text` vectors in plain
 **sqlite**, brute-force cosine in numpy — no native builds to fight on
 Windows. Kinds: `note`, `doc`, `lesson`.
+
+**Project memory** (`gt/project_memory.py`). GT's `CLAUDE.md`: a `GT.md`
+file of standing project instructions (stack, run/test commands,
+conventions) loaded into every work turn, so each session starts already
+knowing the project. Three layers — `~/.gt/GT.md` (you, everywhere), the
+nearest `GT.md`/`AGENTS.md`/`CLAUDE.md` above the workspace, and a
+git-ignored `GT.local.md` for personal overrides. `/init` writes one by
+exploring the project; `# <note>` appends a rule in one keystroke;
+`/memory` shows exactly what's loaded.
 
 **Self-improvement** (`gt/improve.py`). After each task the `reviewer` model
 distills one reusable lesson into memory. Learning by retrieval, not

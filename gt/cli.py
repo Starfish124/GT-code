@@ -55,13 +55,17 @@ HELP = """\
   /auto              toggle auto-approve (skip y/n prompts for writes & commands)
   /permissions       show granted permissions; '/permissions clear' revokes all
   /cd <path>         change the workspace directory GT operates in
+  /init              explore this project and write its GT.md (project memory)
   /index <path>      embed a file or folder into memory for RAG
   /remember <text>   save a note to long-term memory
   /lessons           show lessons GT has learned about itself
-  /memory            memory stats
+  /memory [reload]   memory stats + the GT.md files loaded into context
   /forget <kind|all> clear memory (kinds: note, lesson, doc)
   /reset  /clear     clear the current conversation history
   /quit  /exit       leave
+
+Start a line with [bold]#[/bold] to jot a project note ("# always use pytest") —
+it lands in this project's GT.md, which GT reads on every turn.
 
 Anything else is talk or work. Ask a question and GT just answers; ask for a
 build and it goes straight to it — using tools (files, commands, web,
@@ -117,6 +121,7 @@ class GTShell:
         from . import __version__
         banner.render(self.console, __version__)
         self.console.print(f"\n[dim]workspace:[/dim] {self.agent.cwd}")
+        self._show_project_memory_line()
         wizard.ensure(self.config, self.llm, self.console, self.session.prompt)
         self._startup_check()
         if self.router.prefer_fast:
@@ -143,6 +148,9 @@ class GTShell:
                 self.console.print("\nbye")
                 return
             if not text:
+                continue
+            if text.startswith("#"):
+                self._note(text.lstrip("#").strip())
                 continue
             if text.startswith("/"):
                 if self._command(text):
@@ -217,6 +225,8 @@ class GTShell:
             self._doctor()
         elif cmd == "/cd":
             self._change_dir(arg)
+        elif cmd == "/init":
+            self._init_project()
         elif cmd == "/index":
             self._index(arg)
         elif cmd == "/remember":
@@ -224,7 +234,7 @@ class GTShell:
         elif cmd == "/lessons":
             self._show_kind("lesson", "Learned lessons")
         elif cmd == "/memory":
-            self._memory_stats()
+            self._memory_cmd(arg)
         elif cmd == "/forget":
             self._forget(arg)
         elif cmd in ("/reset", "/clear"):
@@ -665,6 +675,68 @@ class GTShell:
             return
         self.agent.cwd = p.resolve()
         self.console.print(f"workspace → {self.agent.cwd}")
+        # A new workspace means a different project — pick up ITS GT.md.
+        self.agent.reload_project_memory()
+        self._show_project_memory_line()
+
+    # ---- project memory (GT.md — see project_memory.py) ---------------------
+
+    @staticmethod
+    def _fmt_path(p):
+        try:
+            return "~/" + str(Path(p).relative_to(Path.home()))
+        except ValueError:
+            return str(p)
+
+    def _show_project_memory_line(self):
+        files = self.agent.project_memory_files
+        if files:
+            names = ", ".join(self._fmt_path(p) for p in files)
+            self.console.print(f"[dim]· project memory: {names} "
+                               f"({len(self.agent.project_memory)} chars in "
+                               f"context every work turn)[/dim]")
+
+    def _note(self, note):
+        """A '# …' line at the prompt — jot a standing note into GT.md."""
+        if not note:
+            self.console.print("[yellow]usage: # <note>   e.g. "
+                               "# always use pytest, never unittest[/yellow]")
+            return
+        from .project_memory import append_note
+        try:
+            target = append_note(self.agent.cwd, note)
+        except OSError as e:
+            self.console.print(f"[red]couldn't write the note: {e}[/red]")
+            return
+        self.agent.reload_project_memory()
+        self.console.print(f"[green]noted[/green] → {self._fmt_path(target)} "
+                           f"[dim](GT reads it every work turn)[/dim]")
+
+    def _init_project(self):
+        """/init — GT explores the workspace and writes its GT.md brief."""
+        from .project_memory import find_project_file
+        found = find_project_file(self.agent.cwd)
+        task = (
+            "Write the GT.md project brief for this workspace. First explore: "
+            "list the files, and read the README and the package manifests you "
+            "find (package.json, pyproject.toml, requirements.txt, go.mod, "
+            "Cargo.toml…) plus one or two central source files. Then write "
+            "GT.md at the workspace root covering, briefly: what the project "
+            "is; the stack and key dependencies; how to run it and how to run "
+            "the tests (exact commands); the layout (what lives where); and "
+            "any conventions to follow when changing code. Keep it under 60 "
+            "lines of plain markdown — it is loaded into your context on "
+            "every future turn, so concise beats complete.")
+        if found is not None and found.name == "GT.md":
+            task += (" A GT.md already exists — read it first and improve it "
+                     "in place, keeping anything that is still true.")
+        elif found is not None:
+            task += (f" Note: the project has a {found.name} written for "
+                     f"another agent — read it and fold what still holds "
+                     f"into GT.md.")
+        self.agent.run(task)
+        self.agent.reload_project_memory()
+        self._show_project_memory_line()
 
     def _index(self, arg):
         if not arg:
@@ -726,13 +798,40 @@ class GTShell:
         for text, _ in rows:
             self.console.print(f"  • {text}")
 
-    def _memory_stats(self):
+    def _memory_cmd(self, arg):
+        """/memory — vector-memory stats + the GT.md layers in context.
+        '/memory reload' re-reads the GT.md files after an outside edit."""
+        if arg.strip().lower() == "reload":
+            self.agent.reload_project_memory()
+            if self.agent.project_memory_files:
+                self._show_project_memory_line()
+            else:
+                self.console.print("[dim]no GT.md found for this workspace — "
+                                   "start one with /init or a '# note'.[/dim]")
+            return
         self.console.print(
             f"notes: {self.memory.count('note')}   "
             f"lessons: {self.memory.count('lesson')}   "
             f"doc-chunks: {self.memory.count('doc')}   "
             f"total: {self.memory.count()}"
         )
+        files = self.agent.project_memory_files
+        if files:
+            self.console.print("[bold]Project memory (in context every work "
+                               "turn)[/bold]")
+            for p in files:
+                try:
+                    size = p.stat().st_size
+                except OSError:
+                    size = 0
+                self.console.print(f"  • {self._fmt_path(p)}  [dim]({size} "
+                                   f"bytes)[/dim]")
+            self.console.print("[dim]edit the file(s) any time, then /memory "
+                               "reload · add a note fast: # <note>[/dim]")
+        else:
+            self.console.print("[dim]no GT.md project memory for this "
+                               "workspace — /init writes one, or jot a note "
+                               "with '# <note>'.[/dim]")
 
     def _forget(self, arg):
         arg = arg.lower().strip()

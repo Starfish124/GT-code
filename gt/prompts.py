@@ -165,7 +165,7 @@ guidance, not as part of what the user typed."""
 
 def build_system(cwd: str, os_name: str, tools: str,
                  capabilities: str = "", mode: str = "work",
-                 profile: str = "") -> str:
+                 profile: str = "", project_memory: str = "") -> str:
     """The static per-turn-mode system prompt.
 
     Deliberately contains NOTHING that changes between turns: a byte-stable
@@ -191,11 +191,21 @@ def build_system(cwd: str, os_name: str, tools: str,
     prof = (f"\n\n# About this user (learned preferences — honour them by "
             f"default)\n{profile}" if profile else "")
     if mode == "chat":
+        # Chat stays lean on purpose: the project brief is work context, and a
+        # greeting shouldn't pay prefill for it (see project_memory.py).
         return CHAT_TEMPLATE.format(cwd=cwd, os=os_name, capabilities=caps) + prof
+    # The GT.md layer — the project's own standing instructions (loaded once
+    # per session; see project_memory.py). Rides in every work/plan prompt so
+    # GT starts a task already knowing the stack, commands and conventions.
+    pm = (f"\n\n# Project memory (GT.md — this project's standing "
+          f"instructions)\nThe project you are working in defines these rules "
+          f"and facts. They are authoritative for THIS project: follow them "
+          f"over your generic defaults, and don't re-derive what they already "
+          f"tell you.\n\n{project_memory}" if project_memory else "")
     work = SYSTEM_TEMPLATE.format(cwd=cwd, os=os_name, tools=tools, capabilities=caps)
     if mode == "plan":
-        return work + PLAN_DIRECTIVE + prof
-    return work + prof
+        return work + PLAN_DIRECTIVE + pm + prof
+    return work + pm + prof
 
 
 # Appended to the work prompt in /mode plan — flips "build now" into "plan first".

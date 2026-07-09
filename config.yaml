@@ -99,6 +99,18 @@ memory:
   recall_k: 5           # how many memories/lessons to pull into context per turn
   min_score: 0.28       # ignore memories below this similarity (0..1)
 
+project_memory:
+  enabled: true         # load GT.md into every work turn — the project's own
+                        # standing instructions (stack, run/test commands,
+                        # conventions), like Claude Code's CLAUDE.md. Layers:
+                        # ~/.gt/GT.md (you, everywhere) + the nearest GT.md /
+                        # AGENTS.md / CLAUDE.md above the workspace + a
+                        # GT.local.md for personal overrides. Write one with
+                        # /init, jot notes with '# <note>', inspect with /memory.
+  max_chars: 6000       # cap the merged block so a sprawling file can't blow
+                        # the context window (it's prefilled every work turn —
+                        # concise beats complete).
+
 profile:
   enabled: true         # learn YOUR preferences over time (favoured stack, tone,
                         # conventions…) and bias GT's defaults to match. Glass-box:

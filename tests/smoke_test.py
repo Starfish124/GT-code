@@ -990,6 +990,88 @@ check("plan-mode prompt carries the plan-first directive + the tools",
       "PLAN MODE" in _plan_prompt and "do NOT build yet" in _plan_prompt
       and "TOOLS" in _plan_prompt)
 
+print("\nproject memory (GT.md — the CLAUDE.md layer, failure mode #4)")
+import tempfile
+from gt import project_memory as _pm
+
+with tempfile.TemporaryDirectory() as _td:
+    _outer = Path(_td).resolve() / "outer"
+    _repo = _outer / "repo"
+    _src = _repo / "src"
+    _src.mkdir(parents=True)
+    (_repo / ".git").mkdir()
+    (_outer / "GT.md").write_text("outside the repo", encoding="utf-8")
+    check("a GT.md ABOVE the repo root is ignored",
+          _pm.find_project_file(_src) is None)
+    (_repo / "CLAUDE.md").write_text("claude instructions", encoding="utf-8")
+    check("falls back to a repo's existing CLAUDE.md",
+          (_pm.find_project_file(_src) or Path(".")).name == "CLAUDE.md")
+    (_repo / "GT.md").write_text("- use pytest", encoding="utf-8")
+    check("GT.md wins over CLAUDE.md, found from a subfolder",
+          _pm.find_project_file(_src) == _repo / "GT.md")
+
+    _user = Path(_td).resolve() / "user-GT.md"
+    _user.write_text("- tabs never spaces", encoding="utf-8")
+    _text, _files = _pm.load(_src, user_file=_user)
+    check("merged block = user layer then project layer",
+          _text.index("tabs never spaces") < _text.index("use pytest"))
+    check("load reports exactly the files it read",
+          _files == [_user, _repo / "GT.md"])
+    (_repo / "GT.local.md").write_text("- port 5001 locally", encoding="utf-8")
+    _text2, _files2 = _pm.load(_src, user_file=_user)
+    check("GT.local.md overrides ride last",
+          len(_files2) == 3 and "port 5001 locally" in _text2
+          and _text2.index("use pytest") < _text2.index("port 5001"))
+    _big, _ = _pm.load(_src, max_chars=40, user_file=_user)
+    check("merged block is capped at max_chars",
+          len(_big) < 150 and "truncated" in _big)
+    check("missing user file degrades to project-only",
+          _pm.load(_src, user_file=Path(_td).resolve() / "nope.md")[1]
+          == [_repo / "GT.md", _repo / "GT.local.md"])
+
+    _noted = _pm.append_note(_src, "always run the linter")
+    check("# note appends to the existing GT.md",
+          _noted == _repo / "GT.md"
+          and "- always run the linter" in _noted.read_text(encoding="utf-8"))
+
+with tempfile.TemporaryDirectory() as _td2:
+    _r2 = Path(_td2).resolve() / "r2"
+    _r2.mkdir()
+    (_r2 / ".git").mkdir()
+    (_r2 / "CLAUDE.md").write_text("theirs — do not touch", encoding="utf-8")
+    _p2 = _pm.append_note(_r2, "gt-specific note")
+    check("a note never mutates a foreign CLAUDE.md",
+          _p2 == _r2 / "GT.md"
+          and (_r2 / "CLAUDE.md").read_text(encoding="utf-8")
+          == "theirs — do not touch")
+    check("fresh GT.md is created with a header + the note",
+          _p2.read_text(encoding="utf-8").startswith("# GT.md")
+          and "- gt-specific note" in _p2.read_text(encoding="utf-8"))
+
+with tempfile.TemporaryDirectory() as _td3:
+    _w = Path(_td3).resolve() / "w"
+    _w.mkdir()
+    (_w / ".git").mkdir()
+    _p3 = _pm.append_note(_w, "first note")
+    check("no project file at all → GT.md lands in the workspace",
+          _p3 == _w / "GT.md"
+          and "- first note" in _p3.read_text(encoding="utf-8"))
+
+_wm = build_system("C:/w", "Windows", "TOOLS", project_memory="USE PYTEST ALWAYS")
+check("work prompt carries the project memory block",
+      "USE PYTEST ALWAYS" in _wm and "Project memory" in _wm)
+check("chat prompt stays lean — no project memory",
+      "USE PYTEST ALWAYS" not in build_system(
+          "C:/w", "Windows", "TOOLS", mode="chat",
+          project_memory="USE PYTEST ALWAYS"))
+_pl = build_system("C:/w", "Windows", "TOOLS", mode="plan",
+                   project_memory="USE PYTEST ALWAYS")
+check("plan prompt carries it too", "USE PYTEST ALWAYS" in _pl
+      and "PLAN MODE" in _pl)
+check("agent loads project memory at startup",
+      isinstance(_agent.project_memory, str)
+      and isinstance(_agent.project_memory_files, list))
+
 print("\nstartup banner renders (3D wordmark + author + build)")
 from gt import banner as _banner
 _bc = Console(file=io.StringIO(), force_terminal=False)
