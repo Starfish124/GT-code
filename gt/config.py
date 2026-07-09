@@ -23,6 +23,7 @@ models:
   fast:     {provider: ollama, model: "qwen3:8b"}
   tiny:     {provider: ollama, model: "llama3.2:3b"}
   reviewer: {provider: ollama, model: "llama3.2:3b"}
+  analyst:  {provider: ollama, model: "hermes3:3b"}
   embed:    {provider: ollama, model: "nomic-embed-text"}
 
 router:
@@ -188,8 +189,13 @@ class Config:
                     f"'{role}' will fail[/red]")
                 continue
             want = m["model"]
-            guess_fn = _guess_embed if role == "embed" else _guess_chat
+            # The analyst is a specific small model (hermes3:3b) — never guess a
+            # substitute for it, or it'd silently run on a big model. Leave it
+            # exact; the Profiler simply no-ops when it isn't pulled.
             got = _match(want, ids)
+            if got is None and role == "analyst":
+                continue
+            guess_fn = _guess_embed if role == "embed" else _guess_chat
             if got is None:
                 got = guess_fn(ids)
                 if got:

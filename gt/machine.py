@@ -148,6 +148,7 @@ def slow_for_large_models(hw: dict) -> bool:
 CATALOG = {
     "llama3.2:1b":      {"params": "1B",  "dl_gb": 1.3, "job": "/turbo speed profile"},
     "llama3.2:3b":      {"params": "3B",  "dl_gb": 2.0, "job": "router + quick answers"},
+    "hermes3:3b":       {"params": "3B",  "dl_gb": 2.0, "job": "preference analyst (/profile)"},
     "qwen3:8b":         {"params": "8B",  "dl_gb": 5.2, "job": "everyday coding"},
     "qwen3:14b":        {"params": "14B", "dl_gb": 9.3, "job": "heavy coding & planning"},
     "nomic-embed-text": {"params": "137M", "dl_gb": 0.3, "job": "memory / RAG embeddings"},

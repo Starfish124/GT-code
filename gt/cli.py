@@ -22,6 +22,7 @@ from .router import Router
 from .improve import Improver
 from .agent import Agent
 from .permissions import Permissions
+from .profile import Profiler
 from .theme import PURPLE
 from . import wizard, machine, banner
 
@@ -41,6 +42,8 @@ HELP = """\
   /turbo [on|off]    swap the resident model to a 1B for maximum speed (revert
                      with /turbo off) — great on a slow/CPU-only machine
   /benchmark         time a standard set of turns on THIS machine (shareable)
+  /profile [clear|update]  show what GT has learned about your preferences over
+                     time (glass-box); 'update' relearns now, 'clear' wipes it
   /route             toggle smart auto-routing on/off
   /think             toggle deep thinking (Qwen3 reasoning mode; off = snappy)
   /temp [code [chat]] show or set sampling temperature (code vs conversation)
@@ -89,6 +92,11 @@ class GTShell:
             ask=self._ask_user,
         )
 
+        # Learns the user's preferences from each session (periodically, never
+        # per-turn) using the analyst model — see profile.py.
+        self.profiler = Profiler(self.llm, self.config,
+                                 self.config.data_dir / "profile.json")
+
     # ---- interaction callbacks handed to the agent/tools ---------------------
 
     def _ask_user(self, question):
@@ -113,6 +121,8 @@ class GTShell:
             self.console.print(f"[dim]· CPU-only machine ({gpu}) — everyday turns "
                                f"run on the 3B; heavy builds escalate to the 8B, "
                                f"not the 14B (/model brain forces it)[/dim]")
+        if self.config.data.get("profile", {}).get("enabled", True):
+            self.agent.profile_summary = self.profiler.summary()
         self._warmup(self.config.router.get("default", "tiny"))
         self.console.print(f"\n[dim]Try:[/dim] [{PURPLE}]what can you do?[/{PURPLE}]"
                            f"   [dim]·[/dim]   [{PURPLE}]build me a todo app[/{PURPLE}]"
@@ -122,13 +132,19 @@ class GTShell:
         while True:
             try:
                 text = self.session.prompt(_PROMPT).strip()
-            except (EOFError, KeyboardInterrupt):
+            except EOFError:                 # Ctrl-D: leave, but learn first
+                self._finish()
+                self.console.print("bye")
+                return
+            except KeyboardInterrupt:        # Ctrl-C at the prompt: just leave
                 self.console.print("\nbye")
                 return
             if not text:
                 continue
             if text.startswith("/"):
                 if self._command(text):
+                    self._finish()
+                    self.console.print("bye")
                     return  # quit
                 continue
             try:
@@ -139,6 +155,7 @@ class GTShell:
                 self.console.print(f"[red]{e}[/red]")
             except KeyboardInterrupt:
                 self.console.print("\n[yellow](interrupted)[/yellow]")
+            self._maybe_periodic_profile()
 
     # ---- slash commands -----------------------------------------------------
 
@@ -148,8 +165,7 @@ class GTShell:
         arg = parts[1].strip() if len(parts) > 1 else ""
 
         if cmd in ("/quit", "/exit"):
-            self.console.print("bye")
-            return True
+            return True   # run() runs the exit hook, then prints bye
         elif cmd == "/help":
             self.console.print(HELP)
         elif cmd == "/models":
@@ -160,6 +176,8 @@ class GTShell:
             self._turbo(arg)
         elif cmd == "/benchmark":
             self._benchmark()
+        elif cmd == "/profile":
+            self._profile(arg)
         elif cmd == "/route":
             self.router.enabled = not self.router.enabled
             self.console.print(f"auto-routing: [bold]{'on' if self.router.enabled else 'off'}[/bold]")
@@ -353,7 +371,7 @@ class GTShell:
             + (f" ({hw['vram_gb']} GB VRAM)" if hw['vram_gb'] else ""))
         self.console.print(f"[bold]Verdict[/bold]  {rec['reason']}")
         self.console.print("[bold]Line-up[/bold]")
-        for role in ("brain", "fast", "tiny", "reviewer", "embed"):
+        for role in ("brain", "fast", "tiny", "reviewer", "analyst", "embed"):
             try:
                 spec = self.config.model_for(role)
                 self.console.print(f"  {role:<9} {spec['model']}  "
@@ -505,6 +523,83 @@ class GTShell:
         if warm:
             self.console.print(f"[dim]after warm-up: avg {sum(warm)/len(warm):.1f}s"
                                f" · slowest {max(warm):.1f}s per turn[/dim]")
+
+    # ---- preference profile (learned by the analyst model) -----------------
+
+    def _profile(self, arg):
+        """/profile — show what GT has learned; 'clear' wipes it, 'update' runs
+        the analyst on the session so far."""
+        arg = arg.lower().strip()
+        if arg == "clear":
+            self.profiler.clear()
+            self.agent.profile_summary = ""
+            self.console.print("profile cleared — GT will relearn from scratch.")
+            return
+        if arg == "update":
+            self._run_profile_analysis(manual=True)
+            return
+        summary = self.profiler.summary()
+        if not summary:
+            m = self.profiler.model_id()
+            avail = self.profiler.available()
+            self.console.print(
+                "[dim]No preferences learned yet.[/dim] GT builds a short profile "
+                "of your habits when you exit (or run [bold]/profile update[/bold])."
+                + ("" if avail else
+                   f"\n[yellow]Enable it:[/yellow] [bold]ollama pull {m}[/bold]")
+                + f"\n[dim]Glass-box — it's plain JSON at {self.profiler.path}.[/dim]")
+            return
+        self.console.print(f"[bold {PURPLE}]What GT has learned about you[/bold "
+                           f"{PURPLE}]")
+        self.console.print(summary)
+        self.console.print(f"[dim]· {self.profiler.path}  ·  /profile update to "
+                           f"refresh now  ·  /profile clear to wipe[/dim]")
+
+    def _run_profile_analysis(self, manual=False):
+        pcfg = self.config.data.get("profile", {})
+        if not pcfg.get("enabled", True):
+            return
+        log = self.agent.session_log
+        if not log:
+            if manual:
+                self.console.print("[dim]nothing to analyze yet — ask GT a few "
+                                   "things first.[/dim]")
+            return
+        if not manual and len(log) < int(pcfg.get("min_turns", 4)):
+            return
+        if not self.profiler.available():
+            if manual:
+                m = self.profiler.model_id()
+                self.console.print(f"[yellow]analyst model '{m}' isn't pulled.[/"
+                                   f"yellow] Run: [bold]ollama pull {m}[/bold]")
+            return
+        self.console.print(f"[dim]· learning from this session ({len(log)} turns) "
+                           f"with {self.profiler.model_id()} — one moment "
+                           f"(Ctrl-C to skip)…[/dim]")
+        try:
+            _, msg = self.profiler.update(log)
+            self.agent.profile_summary = self.profiler.summary()
+            self.console.print(f"[dim]· {msg}[/dim]")
+        except KeyboardInterrupt:
+            self.console.print("[dim]· skipped.[/dim]")
+
+    def _maybe_periodic_profile(self):
+        """Optionally analyse every N turns (config profile.every_turns > 0).
+        Off by default — mid-session it costs a model load on a one-model box."""
+        pcfg = self.config.data.get("profile", {})
+        n = int(pcfg.get("every_turns", 0) or 0)
+        log = self.agent.session_log
+        if pcfg.get("enabled", True) and n > 0 and log and len(log) % n == 0:
+            self._run_profile_analysis(manual=False)
+
+    def _finish(self):
+        """Exit hook — learn from the session before leaving (config on_quit)."""
+        pcfg = self.config.data.get("profile", {})
+        if pcfg.get("enabled", True) and pcfg.get("on_quit", True):
+            try:
+                self._run_profile_analysis(manual=False)
+            except Exception:
+                pass   # never let profiling block a clean exit
 
     def _change_dir(self, arg):
         if not arg:

@@ -41,6 +41,13 @@ models:
     provider: ollama
     model: "llama3.2:3b"
 
+  # Analyses your session (periodically, never per-turn) to learn your
+  # preferences — see the `profile` section. Pull it to enable:
+  #   ollama pull hermes3:3b
+  analyst:
+    provider: ollama
+    model: "hermes3:3b"
+
   # Embeddings for RAG / long-term memory.
   embed:
     provider: ollama
@@ -91,6 +98,19 @@ memory:
   auto_learn: true      # after each task, the reviewer extracts a lesson into memory
   recall_k: 5           # how many memories/lessons to pull into context per turn
   min_score: 0.28       # ignore memories below this similarity (0..1)
+
+profile:
+  enabled: true         # learn YOUR preferences over time (favoured stack, tone,
+                        # conventions…) and bias GT's defaults to match. Glass-box:
+                        # view/clear it any time with /profile. Needs the analyst
+                        # model pulled (ollama pull hermes3:3b); no-ops without it.
+  on_quit: true         # analyse the session when you exit (skippable with Ctrl-C).
+                        # This loads the analyst model once — a few seconds on a
+                        # GPU, ~30s on a CPU box — and does not run per turn.
+  every_turns: 0        # >0 ALSO analyses every N turns mid-session. Costs a model
+                        # load each time on a one-model box, so leave 0 (exit-only).
+  min_turns: 4          # skip analysis for a session shorter than this
+  max_observations: 8   # cap how many preferences the profile holds
 
 skills:
   enabled: true         # inject expert playbooks (skills/*.md) matched to each

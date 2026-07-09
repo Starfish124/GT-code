@@ -192,6 +192,11 @@ class Agent:
         self.cwd = Path.cwd()
         self.history = []          # [{role, content}] — user msgs + final answers
         self.force_role = None     # set via /model to pin a model
+        # Learned preferences (set by the shell from the Profiler at startup;
+        # session-stable so it rides in the prompt without breaking the cache)
+        # and a lightweight per-session request log the analyst reads later.
+        self.profile_summary = ""
+        self.session_log = []      # [{"user", "outcome"}]
         self.max_steps = int(config.agent.get("max_steps", 12))
         # Keep the working history bounded (in entries = 2 * turns) so a long
         # session's prompt — and therefore its prefill time on a CPU box —
@@ -279,7 +284,8 @@ class Agent:
         mode = "chat" if chat_only else "work"
         system = build_system(cwd=str(self.cwd), os_name=platform.system(),
                               tools=self.tool_docs,
-                              capabilities=self.capabilities, mode=mode)
+                              capabilities=self.capabilities, mode=mode,
+                              profile=self.profile_summary)
         user_content = turn_context(
             user_msg, skills_block(picked, self.skills_inject_chars), memory_block)
 
@@ -394,6 +400,16 @@ class Agent:
         if len(self.history) > self.max_history:
             self.history = self.history[-self.max_history:]
 
+        # Lightweight log of what the user asked, for the periodic preference
+        # analyst (profile.py). Bounded; kept across /reset since it's about the
+        # whole session, not the current conversation thread.
+        self.session_log.append(
+            {"user": user_msg,
+             "outcome": (final_answer or ("(interrupted)" if interrupted
+                                          else ""))[:200]})
+        if len(self.session_log) > 60:
+            self.session_log = self.session_log[-60:]
+
         # Self-improvement — in the background so the prompt returns NOW
         # instead of making the user wait for the reviewer model. Fire it only
         # when there's plausibly something to learn: a FAILED step or a genuinely
@@ -427,7 +443,7 @@ class Agent:
                                       os_name=platform.system(),
                                       tools=self.tool_docs,
                                       capabilities=self.capabilities,
-                                      mode="chat")
+                                      mode="chat", profile=self.profile_summary)
                 self.llm.chat(role,
                               [{"role": "system", "content": system},
                                {"role": "user", "content": "Reply: OK"}],

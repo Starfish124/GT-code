@@ -151,7 +151,8 @@ guidance, not as part of what the user typed."""
 
 
 def build_system(cwd: str, os_name: str, tools: str,
-                 capabilities: str = "", mode: str = "work") -> str:
+                 capabilities: str = "", mode: str = "work",
+                 profile: str = "") -> str:
     """The static per-turn-mode system prompt.
 
     Deliberately contains NOTHING that changes between turns: a byte-stable
@@ -171,9 +172,15 @@ def build_system(cwd: str, os_name: str, tools: str,
     see turn_context().
     """
     caps = capabilities or "read and write files, run commands"
+    # A short, session-stable "about this user" block learned by the analyst
+    # (see profile.py). Empty by default, so this is a no-op until a profile
+    # exists — and stable within a session, so the KV cache stays valid.
+    prof = (f"\n\n# About this user (learned preferences — honour them by "
+            f"default)\n{profile}" if profile else "")
     if mode == "chat":
-        return CHAT_TEMPLATE.format(cwd=cwd, os=os_name, capabilities=caps)
-    return SYSTEM_TEMPLATE.format(cwd=cwd, os=os_name, tools=tools, capabilities=caps)
+        return CHAT_TEMPLATE.format(cwd=cwd, os=os_name, capabilities=caps) + prof
+    return (SYSTEM_TEMPLATE.format(cwd=cwd, os=os_name, tools=tools,
+                                   capabilities=caps) + prof)
 
 
 def turn_context(user_msg: str, skills_block: str = "",

@@ -809,6 +809,57 @@ check("history never grows past the configured cap",
 check("the cap keeps the most recent turns",
       _hist_agent.history[-1]["role"] == "assistant")
 
+print("\npreference profile (analyst-learned, glass-box)")
+from gt.profile import Profiler
+class _AnalystLLM:
+    def __init__(self, reply, served=("hermes3:3b",)):
+        self.reply, self.served = reply, list(served)
+    def chat(self, role, messages, **kw): return self.reply
+    def list_models(self, base, **kw): return self.served
+_pp = Path(__file__).resolve().parent / "_profile.json"
+_pp.unlink(missing_ok=True)
+prof = Profiler(_AnalystLLM("- Prefers Python + Flask\n- Terse answers\n"
+                            "- snake_case files"), cfg, _pp)
+check("analyst availability matches the EXACT served id (hermes3:3b)",
+      prof.available() is True)
+check("hermes3:8b does NOT satisfy a hermes3:3b analyst",
+      Profiler(_AnalystLLM("x", served=("hermes3:8b",)), cfg, _pp).available() is False)
+_obs, _msg = prof.update([{"user": "build a flask api", "outcome": "done"},
+                          {"user": "keep answers short", "outcome": "ok"}])
+check("update learns concrete preferences", any("Flask" in o for o in _obs))
+check("update persists to disk", _pp.exists())
+check("summary renders the profile as bullets", "- Prefers Python" in prof.summary())
+check("generic advice is rejected as noise",
+      prof._parse("- write clean code\n- follow best practices") == [])
+check("a 'nothing learned' reply is treated as no change",
+      prof._parse("No durable preferences yet.") == [])
+check("parse caps at max_observations",
+      len(prof._parse("\n".join(f"- pref {i}" for i in range(20)))) <= prof.max_obs)
+_np = Profiler(_AnalystLLM("- x", served=("llama3.2:3b",)), cfg, _pp)
+_o2, _m2 = _np.update([{"user": "hi", "outcome": "hey"}])
+check("update no-ops with a pull hint when the analyst isn't installed",
+      "ollama pull" in _m2)
+prof.clear()
+check("clear wipes the profile file", not _pp.exists())
+
+_pw = build_system("C:/w", "Windows", "TOOLS", mode="work", profile="- Prefers Flask")
+check("the learned profile is injected into the work prompt",
+      "About this user" in _pw and "Prefers Flask" in _pw)
+check("no profile section when the profile is empty",
+      "About this user" not in build_system("C:/w", "Windows", "TOOLS", mode="work"))
+check("the profile is injected into the lean chat prompt too",
+      "Terse" in build_system("C:/w", "Windows", "TOOLS", mode="chat", profile="- Terse"))
+check("a profile keeps each prompt mode byte-stable (cache-safe)",
+      build_system("C:/w", "Windows", "TOOLS", mode="work", profile="- X")
+      == build_system("C:/w", "Windows", "TOOLS", mode="work", profile="- X"))
+
+_slagent = Agent(llm=_StubLLM(), config=cfg, memory=_Stub(), router=_Stub(),
+                 console=_quiet, improver=_Stub(), approve=lambda *a, **k: True, ask=None)
+_slagent.run("what files are here?")
+check("agent records each turn in the session log for the analyst",
+      bool(_slagent.session_log)
+      and _slagent.session_log[-1]["user"] == "what files are here?")
+
 print("\nrouter heuristics (no LLM call) — 3B-first speed ladder")
 cfg.router["prefer_fast_on_slow"] = False   # test raw routing, hardware-independent
 r = Router(llm=None, config=cfg)
