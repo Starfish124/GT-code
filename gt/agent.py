@@ -118,7 +118,7 @@ def attach_content_block(call, reply):
 
 
 # The one arg per tool that identifies WHAT it acted on, for the turn digest.
-_DIGEST_ARGS = ("command", "path", "question", "query", "url", "id")
+_DIGEST_ARGS = ("command", "path", "question", "query", "url", "task", "id")
 
 
 def digest_line(name, args, result):
@@ -270,6 +270,9 @@ class Agent:
         # (the flappy-bird failure). chat_only is the strict subset that gets the
         # lean, no-tools prompt AND no injected playbook.
         role, conversational, chat_only, prompt_mode = self._resolve_turn(user_msg)
+        # Remembered so a sub-agent spawned this turn runs on the SAME
+        # (already-loaded) model — context isolation without swap churn.
+        self._turn_role = role
         temperature = self._chat_temp() if conversational else self._task_temp()
         prefix = f"[{self.mode} mode] " if self.mode != "auto" else ""
         self.console.print(f"[dim]· {prefix}[bold {PURPLE}]{role}[/bold {PURPLE}]"
@@ -334,7 +337,8 @@ class Agent:
 
         ctx = Ctx(cwd=self.cwd, memory=self.memory,
                   approve=self.approve, config=self.config, ask=self.ask,
-                  user_msg=user_msg, todos=self.todos)
+                  user_msg=user_msg, todos=self.todos,
+                  spawn=self._spawn_subagent)
 
         model_id = self.config.model_for(role)["model"]
         final_answer = None
@@ -527,6 +531,27 @@ class Agent:
         self.session_summary = summary
         self.history = []
         return summary
+
+    def _spawn_subagent(self, task):
+        """Backs the run_agent tool — a fresh-context, read-only research
+        loop (see subagent.py). Only its final report enters this
+        conversation; the exploration itself stays in the sub-agent's own
+        message list and is thrown away with it."""
+        from .subagent import run_subagent
+        role = getattr(self, "_turn_role", None) or "tiny"
+        try:
+            model = self.config.model_for(role)["model"]
+        except KeyError:
+            model = "?"
+        brief = task if len(task) <= 70 else task[:70] + "…"
+        self.console.print(f"[dim]· sub-agent ({model}) researching: "
+                           f"{brief}[/dim]")
+        report, steps = run_subagent(self.llm, self.config, self.memory,
+                                     self.cwd, task, role,
+                                     console=self.console)
+        self.console.print(f"[dim]· sub-agent done ({steps} tool step(s)) — "
+                           f"only its report enters the conversation[/dim]")
+        return report
 
     def reload_project_memory(self):
         """(Re-)read the GT.md layers for the current workspace.
@@ -848,7 +873,7 @@ class Agent:
         return result
 
     # What each tool acted on, for the one-line step header (path, cmd, …).
-    _STEP_TARGET = ("path", "command", "query", "url", "id", "question")
+    _STEP_TARGET = ("path", "command", "query", "url", "task", "id", "question")
 
     def _show_step(self, name, args, result):
         """A clean, minimal trace of one tool step — status, not a code dump.

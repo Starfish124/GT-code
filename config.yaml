@@ -137,6 +137,20 @@ profile:
   min_turns: 4          # skip analysis for a session shorter than this
   max_observations: 8   # cap how many preferences the profile holds
 
+subagents:
+  enabled: true         # give GT a run_agent tool: a READ-ONLY research
+                        # sub-agent (read/list/search/recall/web) that works in
+                        # its own separate context — only its final report
+                        # comes back, so a broad exploration (mapping a
+                        # codebase, chasing usages, web research) never floods
+                        # or permanently slows the main conversation. It runs
+                        # on the same already-loaded model: isolation, not
+                        # parallelism. It cannot write, run commands, nest, or
+                        # ask questions.
+  max_steps: 8          # tool calls a sub-agent may spend before it must
+                        # write its report from what it has
+  max_report_chars: 3000  # cap on the report returned to the main agent
+
 skills:
   enabled: true         # inject expert playbooks (skills/*.md) matched to each
                         # request — how to write good code, Claude-style Excel/

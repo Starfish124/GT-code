@@ -54,6 +54,11 @@ project_memory:
   enabled: true         # load GT.md (project instructions) every work turn
   max_chars: 6000
 
+subagents:
+  enabled: true         # run_agent: read-only research in a separate context
+  max_steps: 8
+  max_report_chars: 3000
+
 skills:
   enabled: true
   max: 2

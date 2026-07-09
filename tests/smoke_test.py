@@ -133,7 +133,8 @@ check("long text splits into overlapping chunks", len(chunks) == 3)
 check("empty text -> no chunks", chunk_text("") == [])
 
 print("\ntool registry + docs")
-check("all 16 tools registered", len(REGISTRY) == 16)
+check("all 17 tools registered", len(REGISTRY) == 17)
+check("run_agent (sub-agents) registered", "run_agent" in REGISTRY)
 check("process tools registered",
       {"check_process", "stop_process"} <= set(REGISTRY))
 check("write_todos (task checklist) registered", "write_todos" in REGISTRY)
@@ -1155,6 +1156,136 @@ for _i in range(4):
 check("compaction disabled -> old turns just fall off (no summarizer call)",
       _dagent.session_summary == "" and not _dllm.summarize_inputs
       and len(_dagent.history) <= _dagent.max_history)
+
+print("\nsub-agents (run_agent — isolated research context, failures #5/#8)")
+import tempfile as _tf
+from gt.subagent import run_subagent, subagent_tools, READONLY_TOOLS
+from gt.tools import RunAgent
+
+_sacfg = Config.load()
+check("run_agent active by default",
+      any(t.name == "run_agent" for t in active_tools(_sacfg)))
+_sacfg_off = Config.load()
+_sacfg_off.data["subagents"] = {"enabled": False}
+check("subagents.enabled: false drops the tool",
+      all(t.name != "run_agent" for t in active_tools(_sacfg_off)))
+_sub_names = {t.name for t in subagent_tools(_sacfg)}
+check("sub-agent toolset is read-only (no write/run/ask, no nesting)",
+      _sub_names <= set(READONLY_TOOLS)
+      and not _sub_names & {"write_file", "edit_file", "run_command",
+                            "ask_user", "run_agent", "write_todos"})
+_plain_ctx = Ctx(cwd=Path("."), memory=None,
+                 approve=lambda *a, **k: True, config=_sacfg)
+check("run_agent without a task errors",
+      "ERROR" in RunAgent().run({}, _plain_ctx))
+check("run_agent without spawn plumbing fails soft",
+      "ERROR" in RunAgent().run({"task": "look around"}, _plain_ctx))
+_spawn_ctx = Ctx(cwd=Path("."), memory=None,
+                 approve=lambda *a, **k: True, config=_sacfg,
+                 spawn=lambda t: f"REPORT on {t}")
+check("run_agent hands the brief to spawn and returns the report",
+      RunAgent().run({"task": "map the repo"}, _spawn_ctx)
+      == "REPORT on map the repo")
+
+class _SubLLM:
+    last_metrics = None
+    def __init__(self, replies):
+        self.replies = list(replies)
+        self.messages_seen = []
+    def chat(self, role, messages, **kw):
+        self.messages_seen.append("\n".join(m["content"] for m in messages))
+        return self.replies.pop(0) if self.replies else "Report: nothing more."
+
+with _tf.TemporaryDirectory() as _std:
+    _sd = Path(_std).resolve()
+    (_sd / "notes.txt").write_text("the port is 5051", encoding="utf-8")
+
+    _sllm = _SubLLM(
+        ['```json\n{"tool":"read_file","args":{"path":"notes.txt"}}\n```',
+         "Report: notes.txt says the port is 5051."])
+    _rep, _steps = run_subagent(_sllm, _sacfg, None, _sd, "find the port",
+                                "tiny", console=_quiet)
+    check("sub-agent reads then reports",
+          "5051" in _rep and _rep.startswith("Report:") and _steps == 1)
+    check("the file content stayed in the sub-agent's own context",
+          any("[tool result: read_file]" in m for m in _sllm.messages_seen))
+
+    _wllm = _SubLLM(
+        ['```json\n{"tool":"write_file","args":{"path":"x.txt","content":"hi"}}\n```',
+         "Report: writing is for the main agent."])
+    run_subagent(_wllm, _sacfg, None, _sd, "write a file", "tiny",
+                 console=_quiet)
+    check("write attempts are refused as read-only",
+          any("not available to a sub-agent" in m for m in _wllm.messages_seen)
+          and not (_sd / "x.txt").exists())
+
+    _lcfg = Config.load()
+    _lcfg.data["subagents"] = {"max_steps": 2}
+    _lllm = _SubLLM(
+        ['```json\n{"tool":"list_dir","args":{"path":"."}}\n```',
+         '```json\n{"tool":"list_dir","args":{"path":"."}}\n```',
+         "Report: out of budget, here is what I saw."])
+    _rep3, _steps3 = run_subagent(_lllm, _lcfg, None, _sd, "map everything",
+                                  "tiny", console=_quiet)
+    check("step budget forces a final report",
+          _steps3 == 2 and _rep3.startswith("Report: out of budget")
+          and any("Step limit reached" in m for m in _lllm.messages_seen))
+
+    _clcfg = Config.load()
+    _clcfg.data["subagents"] = {"max_report_chars": 20}
+    _rep4, _ = run_subagent(_SubLLM(["A" * 100]), _clcfg, None, _sd, "x",
+                            "tiny", console=_quiet)
+    check("oversize reports are clipped", "[report clipped]" in _rep4)
+
+    _bllm = _SubLLM(
+        ['{"tool": "read_file", "args": {"path": "notes.txt"',   # broken JSON
+         "Report: fine after the retry."])
+    _rep6, _ = run_subagent(_bllm, _sacfg, None, _sd, "find the port",
+                            "tiny", console=_quiet)
+    check("broken tool JSON gets one retry, never becomes the report",
+          _rep6 == "Report: fine after the retry."
+          and any("not valid" in m for m in _bllm.messages_seen))
+
+    class _DeadLLM:
+        last_metrics = None
+        def chat(self, *a, **k):
+            raise _LLMError("ollama down")
+    _rep7, _ = run_subagent(_DeadLLM(), _sacfg, None, _sd, "x", "tiny",
+                            console=_quiet)
+    check("LLM failure comes back as an ERROR report", _rep7.startswith("ERROR"))
+
+class _MainSubLLM:
+    """stream=True = the main agent's turns; stream=False = the sub-agent."""
+    last_metrics = None
+    def __init__(self):
+        self.sub_briefs = []
+        self.main_calls = 0
+    def chat(self, role, messages, **kw):
+        if kw.get("stream"):
+            self.main_calls += 1
+            reply = ('```json\n{"tool":"run_agent","args":'
+                     '{"task":"map the gt package"}}\n```'
+                     if self.main_calls == 1
+                     else "Done — mapped it via the sub-agent.")
+            if kw.get("on_token"):
+                kw["on_token"](reply)
+            return reply
+        self.sub_briefs.append(messages[1]["content"])
+        return "SUBREPORT: the gt package has 20 modules."
+
+_illm = _MainSubLLM()
+_iagent = Agent(llm=_illm, config=Config.load(), memory=_Stub(),
+                router=_Stub(), console=_quiet, improver=_Stub(),
+                approve=lambda *a, **k: True, ask=None)
+_ians = _iagent.run("explore the codebase then summarise it")
+check("main agent delegates to a sub-agent and finishes",
+      _ians == "Done — mapped it via the sub-agent.")
+check("the sub-agent got the brief (plus the seeded listing) in a fresh context",
+      len(_illm.sub_briefs) == 1
+      and _illm.sub_briefs[0].startswith("map the gt package")
+      and "[workspace listing" in _illm.sub_briefs[0])
+check("the turn digest remembers the delegation",
+      "run_agent(map the gt package)" in _iagent.history[-1]["content"])
 
 print("\nstartup banner renders (3D wordmark + author + build)")
 from gt import banner as _banner

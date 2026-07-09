@@ -562,6 +562,30 @@ def render_todos(todos) -> str:
 #  Memory tool
 # --------------------------------------------------------------------------- #
 
+class RunAgent(Tool):
+    name = "run_agent"
+    description = ("Send a research sub-agent to investigate something and "
+                   "report back. It reads files and searches the codebase/web "
+                   "in its OWN separate context — only its final report comes "
+                   "back to you, so a broad exploration never floods your "
+                   "conversation. It is READ-ONLY (cannot write or run "
+                   "anything) and cannot ask questions. Use it when answering "
+                   "needs MANY reads or searches (map a codebase, find every "
+                   "usage, research a library); for one or two known files, "
+                   "just read them yourself.")
+    args = {"task": "the job — one clear, self-contained brief; include any "
+                    "paths/names you already know"}
+
+    def run(self, args, ctx):
+        task = str(args.get("task") or "").strip()
+        if not task:
+            return "ERROR: run_agent needs a 'task' brief."
+        if ctx.spawn is None:
+            return ("ERROR: sub-agents are not available here — do the "
+                    "research yourself with read_file/search_files.")
+        return ctx.spawn(task)
+
+
 class Recall(Tool):
     name = "recall"
     description = ("Search long-term memory (notes, lessons, indexed docs) for "
@@ -696,7 +720,7 @@ class WebFetch(Tool):
 ALL_TOOLS = [
     ReadFile(), WriteFile(), EditFile(), ListDir(),
     SearchFiles(), RunCommand(), CheckProcess(), StopProcess(),
-    WriteTodos(), Recall(), AskUser(), WebSearch(), WebFetch(),
+    WriteTodos(), RunAgent(), Recall(), AskUser(), WebSearch(), WebFetch(),
 ] + OFFICE_TOOLS
 REGISTRY = {t.name: t for t in ALL_TOOLS}
 
@@ -705,9 +729,14 @@ _WEB_TOOLS = {"web_search", "web_fetch"}
 
 
 def active_tools(config) -> list:
-    """Return the tools available given config (drops web tools if disabled)."""
+    """The tools available given config — web tools drop out when
+    web.enabled is false, run_agent when subagents.enabled is false."""
     web_on = getattr(config, "web", {}).get("enabled", True)
-    return [t for t in ALL_TOOLS if web_on or t.name not in _WEB_TOOLS]
+    sub_on = getattr(config, "data", {}).get(
+        "subagents", {}).get("enabled", True)
+    return [t for t in ALL_TOOLS
+            if (web_on or t.name not in _WEB_TOOLS)
+            and (sub_on or t.name != "run_agent")]
 
 
 # A short, human phrase for each tool that grants a real capability — used to
@@ -719,6 +748,7 @@ _CAPABILITY = {
     "edit_file": "edit files",
     "search_files": "search across the codebase",
     "run_command": "run shell commands, scripts and dev servers",
+    "run_agent": "delegate research to a read-only sub-agent",
     "recall": "remember things across sessions",
     "web_search": "search the web",
     "web_fetch": "open and read web pages",

@@ -286,6 +286,17 @@ system prompt, which stays KV-cached). Runs after your answer, on the
 always-hot model — no swap, no reload. `/compact` runs it on demand and shows
 the summary; degrades to the plain drop when Ollama is unreachable.
 
+**Sub-agents** (`gt/subagent.py`). GT's Task tool: `run_agent` sends a
+research sub-agent to investigate in its **own separate context** — read
+files, search the codebase, browse the web — and only its final report comes
+back, so mapping a codebase never floods (or permanently slows) the main
+conversation. Scaled for local models: it runs on the same already-loaded
+model (isolation, not parallelism), its toolset is strictly read-only (no
+writes, no commands, no permission prompts), it cannot nest or ask questions,
+and it gets the workspace listing seeded up front so a small model has
+nothing to guess. Step-budgeted; every claim in the report must name the
+file it came from.
+
 ---
 
 ## Configuration reference (`config.yaml`)
@@ -305,6 +316,10 @@ compaction:
   enabled: true      # summarize old turns instead of dropping them
   keep_turns: 5      # exchanges kept verbatim after a compaction
   max_chars: 1500    # cap on the rolling session summary
+subagents:
+  enabled: true      # run_agent: read-only research in a separate context
+  max_steps: 8       # tool calls before the sub-agent must report
+  max_report_chars: 3000
 web:
   enabled: true      # web_search / web_fetch tools; false = fully offline
 ```
