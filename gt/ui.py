@@ -39,7 +39,7 @@ class _Waiting:
         if elapsed < 3:
             hint = ""
         elif elapsed < 12:
-            hint = "  (loading model into RAM — one-time)"
+            hint = "  (loading the model into RAM — one-time per boot, then instant)"
         else:
             hint = "  (large prompt on CPU is slow — this is prompt-reading, not stuck)"
         return Text(f"{frame} {self.label} — {elapsed:.1f}s{hint}", style="dim")

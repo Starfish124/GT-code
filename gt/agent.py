@@ -22,6 +22,7 @@ from .skills import load_skills, select, skills_block, SkillIndex
 from .tools import Ctx, active_tools, tool_docs, capability_summary
 from .ui import streaming_markdown
 from .llm import LLMError
+from .theme import PURPLE
 
 
 # Matches ```json { ... } ``` (and bare ``` ... ```) fenced blocks.
@@ -237,8 +238,8 @@ class Agent:
         # already carries the conversation guidance, so injecting it is waste.
         chat_only = self._chat_only(user_msg)
         temperature = self._chat_temp() if conversational else self._task_temp()
-        self.console.print(f"[dim]· routed to [bold]{role}[/bold] "
-                           f"({self.config.model_for(role)['model']}) · "
+        self.console.print(f"[dim]· routed to [bold {PURPLE}]{role}[/bold {PURPLE}]"
+                           f"[dim] ({self.config.model_for(role)['model']}) · "
                            f"T={temperature:g} {'chat' if conversational else 'code'}"
                            f"[/dim]")
 
@@ -373,12 +374,17 @@ class Agent:
         # stays valid); intermediate tool chatter is replaced by a compact
         # digest so the next turn knows what was actually done.
         self.history.append({"role": "user", "content": user_content})
-        stored = final_answer
+        # Keep the HISTORY copy of a long answer lean (the user already saw the
+        # full text live) so a verbose reply doesn't bloat every later prefill.
+        answer = final_answer
+        if answer and len(answer) > 1200:
+            answer = answer[:1200] + "… [answer trimmed in history]"
+        stored = answer
         if trace:
             digest = "\n".join(trace)
             if len(digest) > 2000:
                 digest = digest[:2000] + "\n… [more steps]"
-            stored = ((final_answer or
+            stored = ((answer or
                        "(I was stopped before giving a final answer.)")
                       + f"\n\n[actions taken this turn]\n{digest}")
         elif interrupted:
@@ -621,7 +627,7 @@ class Agent:
                        if args.get(k)), "")
         if len(target) > 60:
             target = "…" + target[-59:]
-        head = f"[bold cyan]> {name}[/bold cyan]"
+        head = f"[bold {PURPLE}]> {name}[/bold {PURPLE}]"
         if target:
             head += f"  [dim]{target}[/dim]"
         self.console.print(head)

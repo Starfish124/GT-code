@@ -705,6 +705,18 @@ check("a real build phrased as a question is still work",
       not _tagent._is_conversational("can you build me a todo app?"))
 check("plain coding stays work despite the word test",
       not _tagent._is_conversational("fix the failing unit test in main.py"))
+# file / folder / office requests are WORK, not chit-chat — so they get the
+# tight temperature + tools, NOT the "no tools" conversation playbook.
+check("file requests are treated as work",
+      not _tagent._is_conversational("read config.yaml")
+      and not _tagent._is_conversational("list the files here")
+      and not _tagent._is_conversational("what is in package.json"))
+check("office-doc requests are treated as work",
+      not _tagent._is_conversational("make an excel of Q3 sales")
+      and not _tagent._is_conversational("create a 5 slide deck"))
+check("chit-chat with an action word stays conversation (no false positive)",
+      _tagent._is_conversational("read any good books lately?")
+      and _tagent._is_conversational("what do you think about rust?"))
 # conversation gets the light conversation playbook, not engineering ones
 from gt.skills import load_skills as _ls
 check("a conversation playbook ships and is loadable",

@@ -3,10 +3,12 @@
 Run with:  python -m gt   (or start.bat on Windows)
 """
 
+import io
 import sys
 from pathlib import Path
 
 from prompt_toolkit import PromptSession
+from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.history import FileHistory
 from rich.console import Console
 from rich.panel import Panel
@@ -20,7 +22,14 @@ from .router import Router
 from .improve import Improver
 from .agent import Agent
 from .permissions import Permissions
+from .theme import PURPLE
 from . import wizard, machine, banner
+
+# The interactive prompt, in GT purple (prompt_toolkit wants a lowercase hex).
+_PROMPT = HTML(f'<b><style fg="{PURPLE.lower()}">gt› </style></b>')
+
+# The 1B the /turbo speed profile swaps the resident model to.
+TURBO_MODEL = "llama3.2:1b"
 
 HELP = """\
 [bold]Commands[/bold]
@@ -29,6 +38,9 @@ HELP = """\
   /doctor            show this machine's hardware + which models are live
   /models            list model ids your Ollama + LM Studio actually serve
   /model <role|off>  pin a model role (brain/fast/tiny) or 'off' to auto-route
+  /turbo [on|off]    swap the resident model to a 1B for maximum speed (revert
+                     with /turbo off) — great on a slow/CPU-only machine
+  /benchmark         time a standard set of turns on THIS machine (shareable)
   /route             toggle smart auto-routing on/off
   /think             toggle deep thinking (Qwen3 reasoning mode; off = snappy)
   /temp [code [chat]] show or set sampling temperature (code vs conversation)
@@ -82,7 +94,7 @@ class GTShell:
     def _ask_user(self, question):
         """Backs the ask_user tool — GT asks, the user types an answer."""
         self.console.print(Panel(Text(question), title="GT asks",
-                                 border_style="cyan", expand=False))
+                                 border_style=PURPLE, expand=False))
         try:
             return self.session.prompt("  your answer › ").strip()
         except (EOFError, KeyboardInterrupt):
@@ -102,11 +114,14 @@ class GTShell:
                                f"run on the 3B; heavy builds escalate to the 8B, "
                                f"not the 14B (/model brain forces it)[/dim]")
         self._warmup(self.config.router.get("default", "tiny"))
-        self.console.print("\n[dim]/help for commands · /quit to exit · just "
+        self.console.print(f"\n[dim]Try:[/dim] [{PURPLE}]what can you do?[/{PURPLE}]"
+                           f"   [dim]·[/dim]   [{PURPLE}]build me a todo app[/{PURPLE}]"
+                           f"   [dim]·[/dim]   [{PURPLE}]/benchmark[/{PURPLE}]")
+        self.console.print("[dim]/help for commands · /quit to exit · just "
                            "type to talk or build[/dim]\n")
         while True:
             try:
-                text = self.session.prompt("gt› ").strip()
+                text = self.session.prompt(_PROMPT).strip()
             except (EOFError, KeyboardInterrupt):
                 self.console.print("\nbye")
                 return
@@ -141,6 +156,10 @@ class GTShell:
             self._show_models()
         elif cmd == "/model":
             self._set_model(arg)
+        elif cmd == "/turbo":
+            self._turbo(arg)
+        elif cmd == "/benchmark":
+            self._benchmark()
         elif cmd == "/route":
             self.router.enabled = not self.router.enabled
             self.console.print(f"auto-routing: [bold]{'on' if self.router.enabled else 'off'}[/bold]")
@@ -207,7 +226,9 @@ class GTShell:
         except KeyError:
             return
         self.console.print(f"[dim]· warming up {role} ({model}) in the "
-                           f"background…[/dim]")
+                           f"background — the first load takes ~30s on a CPU "
+                           f"box, then it stays hot all session (and, with "
+                           f"keep_alive, across launches)[/dim]")
         # Prewarm with the REAL system prompt so the first turn reuses the KV
         # cache instead of paying the whole system-prompt prefill.
         self.agent.prewarm(role)
@@ -380,6 +401,110 @@ class GTShell:
         self.console.print(f"pinned to [bold]{arg}[/bold] "
                            f"({self.config.model_for(arg)['model']})")
         self._warmup(arg)  # start loading it now, not at the first prompt
+
+    def _turbo(self, arg):
+        """Swap the resident (tiny) model to a 1B for maximum speed, or back.
+
+        On a slow/CPU-only box the 3B's load + prefill dominate; a 1B loads and
+        runs noticeably faster at some cost to quality. Session-only — builds
+        still escalate to the 8B/14B, and /turbo off restores the 3B.
+        """
+        tiny = self.config.models.get("tiny")
+        if not tiny:
+            self.console.print("[yellow]no 'tiny' role configured.[/yellow]")
+            return
+        arg = arg.lower().strip()
+        on = getattr(self, "_turbo_on", False)
+
+        if arg in ("off", "0", "no", "false"):
+            if not on:
+                self.console.print("[dim]turbo is already off.[/dim]")
+                return
+            tiny["model"] = self._turbo_saved
+            self._turbo_on = False
+            self.console.print(f"turbo [bold]off[/bold] — resident model back to "
+                               f"[bold {PURPLE}]{tiny['model']}[/bold {PURPLE}].")
+            self._warmup("tiny")
+            return
+
+        if on:
+            self.console.print(f"[dim]turbo already on ({tiny['model']}). "
+                               f"/turbo off to revert.[/dim]")
+            return
+        try:
+            served = self.llm.list_models(self.config.provider_base("ollama"))
+        except LLMError:
+            served = []
+        if not any("llama3.2" in s and "1b" in s.lower() for s in served):
+            self.console.print(
+                f"[yellow]{TURBO_MODEL} isn't pulled yet.[/yellow] It's a "
+                f"~1.3 GB download that loads and runs faster than the 3B on a "
+                f"CPU box.\n  Pull it:  [bold]ollama pull {TURBO_MODEL}[/bold]"
+                f"   then run /turbo again.")
+            return
+        self._turbo_saved = tiny["model"]
+        tiny["model"] = TURBO_MODEL
+        self._turbo_on = True
+        self.console.print(f"turbo [bold]on[/bold] — resident model is now "
+                           f"[bold {PURPLE}]{TURBO_MODEL}[/bold {PURPLE}] "
+                           f"(faster, a little less capable; builds still "
+                           f"escalate to the 8B/14B). [dim]/turbo off to "
+                           f"revert.[/dim]")
+        self._warmup("tiny")
+
+    def _benchmark(self):
+        """Time a standard set of turns on THIS machine so a user can see (and
+        share) how GT performs on their hardware."""
+        import time
+        seq = [("hi", "chat"),
+               ("what can you do?", "chat"),
+               ("can you browse the internet?", "chat"),
+               ("list the files in this folder", "work"),
+               ("read the file config.yaml", "work")]
+        self.console.print(
+            f"[bold {PURPLE}]Benchmark[/bold {PURPLE}] — timing {len(seq)} turns "
+            f"[dim](the first turn includes any one-time model load)[/dim]")
+
+        # Run against the real model but swallow the answers, and keep the
+        # user's actual conversation untouched.
+        real_console = self.agent.console
+        saved = (list(self.agent.history), set(self.agent._seen_skills),
+                 set(self.agent._seen_memory))
+        self.agent.console = Console(file=io.StringIO())
+        rows = []
+        try:
+            for msg, kind in seq:
+                t0 = time.perf_counter()
+                try:
+                    self.agent.run(msg)
+                    wall = time.perf_counter() - t0
+                    rows.append((msg, kind, wall, dict(self.llm.last_metrics or {})))
+                except Exception as e:
+                    rows.append((msg, kind, None, str(e)[:40]))
+        finally:
+            self.agent.console = real_console
+            (self.agent.history, self.agent._seen_skills,
+             self.agent._seen_memory) = saved
+
+        table = Table(title="per-turn timing")
+        table.add_column("turn", style=PURPLE)
+        table.add_column("kind", style="dim")
+        table.add_column("load_s", justify="right")
+        table.add_column("prompt_tok", justify="right")
+        table.add_column("tok/s", justify="right")
+        table.add_column("total_s", justify="right")
+        for msg, kind, wall, m in rows:
+            if wall is None:
+                table.add_row(msg[:28], kind, "-", "-", "-", f"[red]{m}[/red]")
+                continue
+            table.add_row(msg[:28], kind, f"{m.get('load_s', 0):.1f}",
+                          str(m.get("prompt_tokens", 0)),
+                          f"{m.get('tps', 0):.0f}", f"{wall:.1f}")
+        self.console.print(table)
+        warm = [r[2] for r in rows if r[2] is not None][1:]  # exclude cold turn 1
+        if warm:
+            self.console.print(f"[dim]after warm-up: avg {sum(warm)/len(warm):.1f}s"
+                               f" · slowest {max(warm):.1f}s per turn[/dim]")
 
     def _change_dir(self, arg):
         if not arg:

@@ -146,6 +146,7 @@ def slow_for_large_models(hw: dict) -> bool:
 # Everything is Ollama — one provider, no LM Studio required.
 # dl_gb ≈ download size (q4 quant), so the wizard can warn before pulling.
 CATALOG = {
+    "llama3.2:1b":      {"params": "1B",  "dl_gb": 1.3, "job": "/turbo speed profile"},
     "llama3.2:3b":      {"params": "3B",  "dl_gb": 2.0, "job": "router + quick answers"},
     "qwen3:8b":         {"params": "8B",  "dl_gb": 5.2, "job": "everyday coding"},
     "qwen3:14b":        {"params": "14B", "dl_gb": 9.3, "job": "heavy coding & planning"},

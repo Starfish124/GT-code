@@ -27,13 +27,21 @@ _SMALL_TALK = re.compile(
     r"good morning|good night|bye|gm|gn)\b",
     re.I,
 )
-# Signals of everyday coding/agentic work -> fast 8B, skip the classifier.
+# Signals that a message is real work (files, code, docs) rather than chat —
+# drives temperature + whether engineering playbooks load. High-precision
+# tokens only: nouns, file extensions and office types, so plain chit-chat
+# ("read any good books?", "who are you?") is NOT swept in. Bare verbs like
+# "read/open/show" are deliberately excluded for that reason.
 _CODE_HINT = re.compile(
     r"\b(code|bug|error|stack ?trace|function|class|refactor|implement|"
-    r"compile|test|install|run|file|repo|git|debug|api|regex|script|"
+    r"compile|test|install|run|files?|folders?|director(y|ies)|repo|git|"
+    r"debug|api|regex|script|"
     r"frontend|backend|website|web ?app|webpage|server|database|deploy|"
     r"host(ing)?|html|css|react|vue|svelte|node|python|"
-    r"\.py|\.js|\.ts|\.rs|\.go|\.java|\.c|\.cpp|\.sh|traceback)\b",
+    r"excel|spreadsheet|powerpoint|slides?|\bdeck\b|word doc(ument)?|"
+    r"\.py|\.js|\.ts|\.rs|\.go|\.java|\.c|\.cpp|\.sh|"
+    r"\.ya?ml|\.json|\.md|\.txt|\.toml|\.ini|\.cfg|\.xml|\.csv|\.log|\.env|"
+    r"\.html|\.css|\.xlsx|\.pptx|\.docx|traceback)\b",
     re.I,
 )
 # Signals that real REASONING is needed -> brain 14B is worth its load time.
