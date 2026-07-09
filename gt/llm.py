@@ -1,16 +1,14 @@
-"""Unified client for local model servers.
+"""Client for the local Ollama server.
 
-Ollama gets its NATIVE /api/chat endpoint: that unlocks keep_alive (models
-stay hot in RAM between requests instead of being evicted), think=false
-(Qwen3's hidden reasoning mode off by default — the single biggest latency
-win), and precise per-request metrics (model load time, prefill time,
-generation tok/s) that GT surfaces to the user.
-
-Everything else (LM Studio, vLLM, ...) uses the OpenAI-compatible shape.
+GT talks to Ollama's NATIVE /api/chat endpoint: that unlocks keep_alive (models
+stay hot in RAM between requests instead of being evicted), think=false (Qwen3's
+hidden reasoning mode off by default — the single biggest latency win), and
+precise per-request metrics (model load time, prefill time, generation tok/s)
+that GT surfaces to the user. Embeddings and model listing use Ollama's
+OpenAI-compatible /v1 endpoints.
 """
 
 import json
-import time
 import requests
 
 
@@ -42,16 +40,12 @@ class LLM:
         spec = self.config.model_for(role)
         self.last_metrics = None
         try:
-            if spec["provider"] == "ollama":
-                return self._chat_ollama(spec, messages, stream, temperature,
-                                         on_token, timeout)
-            return self._chat_openai(spec, messages, stream, temperature,
+            return self._chat_ollama(spec, messages, stream, temperature,
                                      on_token, timeout)
         except requests.exceptions.ConnectionError:
             raise LLMError(self._conn_msg(spec))
         except requests.exceptions.Timeout:
-            raise LLMError(f"'{spec['model']}' ({spec['provider']}) timed out "
-                           f"after {timeout}s.")
+            raise LLMError(f"'{spec['model']}' timed out after {timeout}s.")
 
     # ---- Ollama native path ---------------------------------------------------
 
@@ -133,53 +127,6 @@ class LLM:
             "total_s": (obj.get("total_duration") or 0) / ns,
         }
 
-    # ---- OpenAI-compatible path (LM Studio, vLLM, ...) -------------------------
-
-    def _chat_openai(self, spec, messages, stream, temperature, on_token, timeout):
-        url = spec["base_url"] + "/chat/completions"
-        payload = {
-            "model": spec["model"],
-            "messages": messages,
-            "temperature": temperature,
-            "stream": bool(stream),
-        }
-        t0 = time.perf_counter()
-        if stream:
-            text = self._chat_stream(url, payload, on_token, timeout)
-        else:
-            r = requests.post(url, json=payload, timeout=timeout)
-            self._raise_for_status(r, spec)
-            text = r.json()["choices"][0]["message"]["content"] or ""
-        total = time.perf_counter() - t0
-        approx_tokens = max(1, len(text) // 4)
-        self.last_metrics = {"load_s": 0, "prefill_s": 0, "prompt_tokens": 0,
-                             "tokens": approx_tokens,
-                             "tps": approx_tokens / total if total > 0 else 0,
-                             "total_s": total}
-        return text
-
-    def _chat_stream(self, url, payload, on_token, timeout):
-        chunks = []
-        with requests.post(url, json=payload, stream=True, timeout=timeout) as r:
-            self._raise_for_status(r, None)
-            for line in r.iter_lines(decode_unicode=True):
-                if not line or not line.startswith("data:"):
-                    continue
-                data = line[len("data:"):].strip()
-                if data == "[DONE]":
-                    break
-                try:
-                    obj = json.loads(data)
-                except json.JSONDecodeError:
-                    continue
-                delta = (obj.get("choices") or [{}])[0].get("delta", {})
-                tok = delta.get("content")
-                if tok:
-                    chunks.append(tok)
-                    if on_token:
-                        on_token(tok)
-        return "".join(chunks)
-
     # ---- embeddings ---------------------------------------------------------
 
     def embed(self, role, texts, timeout=120):
@@ -209,10 +156,7 @@ class LLM:
             data = r.json().get("data") or []
             return [m["id"] for m in data]
         except requests.exceptions.ConnectionError:
-            hint = ("Start its local server (Developer tab -> Start Server)."
-                    if ":1234" in base_url
-                    else "Make sure Ollama is running.")
-            raise LLMError(f"Can't reach {base_url}. {hint}")
+            raise LLMError(f"Can't reach {base_url}. Make sure Ollama is running.")
         except requests.exceptions.Timeout:
             raise LLMError(f"Timed out reaching {base_url}.")
         except Exception as e:
@@ -222,12 +166,9 @@ class LLM:
 
     @staticmethod
     def _conn_msg(spec):
-        prov = spec["provider"] if spec else "the server"
         url = spec["base_url"] if spec else "?"
-        hint = ("Start its local server (Developer tab -> Start Server)."
-                if prov == "lmstudio"
-                else "Make sure Ollama is running (it usually starts on boot).")
-        return f"Can't reach {prov} at {url}. {hint}"
+        return (f"Can't reach Ollama at {url}. Make sure Ollama is running "
+                "(it usually starts on boot).")
 
     @staticmethod
     def _raise_for_status(r, spec):

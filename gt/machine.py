@@ -143,7 +143,7 @@ def slow_for_large_models(hw: dict) -> bool:
 #  Model catalogue + tiering
 # --------------------------------------------------------------------------- #
 
-# Everything is Ollama — one provider, no LM Studio required.
+# Everything is served by Ollama — one local provider.
 # dl_gb ≈ download size (q4 quant), so the wizard can warn before pulling.
 CATALOG = {
     "llama3.2:1b":      {"params": "1B",  "dl_gb": 1.3, "job": "/turbo speed profile"},

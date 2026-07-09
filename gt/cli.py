@@ -36,7 +36,7 @@ HELP = """\
   /help              show this help
   /setup             re-run first-launch setup (evaluate machine, download models)
   /doctor            show this machine's hardware + which models are live
-  /models            list model ids your Ollama + LM Studio actually serve
+  /models            list the model ids Ollama is actually serving
   /model <role|off>  pin a model role (brain/fast/tiny) or 'off' to auto-route
   /turbo [on|off]    swap the resident model to a 1B for maximum speed (revert
                      with /turbo off) — great on a slow/CPU-only machine

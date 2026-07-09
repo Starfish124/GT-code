@@ -10,12 +10,9 @@
 # ============================================================================
 
 providers:
-  # Ollama is the primary (and only required) provider.
+  # Ollama is the model server GT runs on — the only provider it needs.
   ollama:
     base_url: http://localhost:11434/v1
-  # LM Studio is OPTIONAL — if its server is running, GT can fall back to it.
-  lmstudio:
-    base_url: http://localhost:1234/v1
 
 # Defaults for a mid-range machine; the wizard overrides these per machine.
 models:

@@ -17,8 +17,6 @@ DEFAULT_CONFIG = """\
 providers:
   ollama:
     base_url: http://localhost:11434/v1
-  lmstudio:
-    base_url: http://localhost:1234/v1
 
 models:
   brain:    {provider: ollama, model: "qwen3:14b"}
@@ -161,12 +159,11 @@ class Config:
     def auto_resolve(self, llm, console=None):
         """Best-effort startup pass so GT 'just works' on a fresh machine:
 
-        * ping each provider and report reachability,
+        * ping Ollama and report reachability,
         * match every role's configured model id against what's actually
           served (exact -> fuzzy -> best guess for placeholders like
-          'your-28b-model'),
-        * if a role's provider is down (e.g. LM Studio not started), re-point
-          the role at any live provider (brain falls back to Ollama).
+          'your-28b-model'), so a role whose exact model isn't pulled still
+          resolves to a live one.
 
         Only mutates the in-memory config — config.yaml is never edited.
         """
@@ -182,42 +179,29 @@ class Config:
             except Exception:
                 served[name] = None
                 say(f"[yellow]--[/yellow] {name}: not reachable at "
-                    f"{prov['base_url']} [dim](GT will fall back if it can)[/dim]")
-        live = [n for n, ids in served.items() if ids]
+                    f"{prov['base_url']} [dim](is Ollama running?)[/dim]")
 
         for role, m in self.models.items():
-            want, ids = m["model"], served.get(m["provider"])
-            guess_fn = _guess_embed if role == "embed" else _guess_chat
-
-            if ids:  # provider is up
-                got = _match(want, ids)
-                if got is None:
-                    got = guess_fn(ids)
-                    if got:
-                        hint = (f" [yellow](for the full {role}, run: "
-                                f"ollama pull {want} — or /setup)[/yellow]"
-                                if role == "brain" else "")
-                        say(f"[dim]{role}: '{want}' not served — "
-                            f"using '{got}'[/dim]{hint}")
-                elif got != want:
-                    say(f"[dim]{role}: '{want}' -> matched '{got}'[/dim]")
-                if got:
-                    m["model"] = got
-                    continue
-
-            # provider down (or served nothing usable): try any live provider
-            for other in live:
-                if other == m["provider"]:
-                    continue
-                got = _match(want, served[other]) or guess_fn(served[other])
-                if got:
-                    say(f"[yellow]{role}: {m['provider']} unavailable — "
-                        f"falling back to {other} '{got}'[/yellow]")
-                    m["provider"], m["model"] = other, got
-                    break
-            else:
+            ids = served.get(m["provider"])
+            if not ids:
                 say(f"[red]{role}: no reachable model — requests needing "
                     f"'{role}' will fail[/red]")
+                continue
+            want = m["model"]
+            guess_fn = _guess_embed if role == "embed" else _guess_chat
+            got = _match(want, ids)
+            if got is None:
+                got = guess_fn(ids)
+                if got:
+                    hint = (f" [yellow](for the full {role}, run: "
+                            f"ollama pull {want} — or /setup)[/yellow]"
+                            if role == "brain" else "")
+                    say(f"[dim]{role}: '{want}' not served — "
+                        f"using '{got}'[/dim]{hint}")
+            elif got != want:
+                say(f"[dim]{role}: '{want}' -> matched '{got}'[/dim]")
+            if got:
+                m["model"] = got
 
     @classmethod
     def load(cls, path: Path | None = None) -> "Config":
