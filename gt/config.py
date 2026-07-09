@@ -38,7 +38,7 @@ agent:
 
 performance:
   thinking: false
-  keep_alive: 30m
+  keep_alive: 8h        # keep the model hot: cold load paid once per boot
   num_ctx: 8192
 
 memory:

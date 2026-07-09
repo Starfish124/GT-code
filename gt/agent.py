@@ -87,6 +87,14 @@ _CAPABILITY_Q = re.compile(
     r"|do (you|u) have access"
     r"|is it possible for (you|u))\b")
 
+# Identity / small-talk questions that never need a tool — get the lean prompt
+# so they answer instantly instead of prefilling the whole toolset.
+_CHITCHAT = re.compile(
+    r"(?i)\b(who (are|r) (you|u)|what (are|r) (you|u)|what'?s your name"
+    r"|who (made|built|created|wrote) (you|u)|how (are|r) (you|u)"
+    r"|how'?s it going|how do (you|u) (do|feel)|what'?s up"
+    r"|tell me about (yourself|you)|what do (you|u) think)\b")
+
 
 def attach_content_block(call, reply):
     """Let write_file take its content as a raw fenced block after the json.
@@ -184,6 +192,10 @@ class Agent:
         self.history = []          # [{role, content}] — user msgs + final answers
         self.force_role = None     # set via /model to pin a model
         self.max_steps = int(config.agent.get("max_steps", 12))
+        # Keep the working history bounded (in entries = 2 * turns) so a long
+        # session's prompt — and therefore its prefill time on a CPU box —
+        # doesn't creep up turn after turn. Older turns drop off; /reset clears.
+        self.max_history = int(config.agent.get("max_history_turns", 10)) * 2
 
         # Tools available this session (web tools dropped if web.enabled=false).
         self.tools = {t.name: t for t in active_tools(config)}
@@ -198,13 +210,17 @@ class Agent:
         self.skills_max = int(skills_cfg.get("max", 2))
         self.skills_inject_chars = int(skills_cfg.get("inject_max_chars", 1500))
         # Semantic skill selection over a (potentially large) imported library.
-        # Built once, cached, and off the main thread so startup stays snappy;
-        # until it's ready, selection falls back to keyword matching.
+        # Cached, and off the main thread; until it's ready, selection falls
+        # back to keyword matching.
         self.skill_index = None
         if self.skills and skills_cfg.get("select", "auto") != "keyword":
             self.skill_index = SkillIndex(
                 self.llm, Path(config.data_dir) / "skills_emb.db")
-            self._build_skill_index_async()
+        # Embedding the whole library is seconds of CPU. Doing it at startup
+        # steals the CPU from the one-time model load (making the first "Hi"
+        # slower), and a pure-chat session never needs it — so defer the build
+        # to the first WORK turn that actually selects a playbook.
+        self._skill_index_started = False
 
         # What's already been injected this session (it lives on in history,
         # so re-sending it would only waste context tokens).
@@ -216,6 +232,10 @@ class Agent:
     def run(self, user_msg):
         role = self.force_role or self.router.route(user_msg)
         conversational = self._is_conversational(user_msg)
+        # chat_only (small talk / capability Qs) is the strict subset that gets
+        # the lean, no-tools prompt AND no injected playbook — the lean prompt
+        # already carries the conversation guidance, so injecting it is waste.
+        chat_only = self._chat_only(user_msg)
         temperature = self._chat_temp() if conversational else self._task_temp()
         self.console.print(f"[dim]· routed to [bold]{role}[/bold] "
                            f"({self.config.model_for(role)['model']}) · "
@@ -231,9 +251,14 @@ class Agent:
         # engineering playbooks bloating a simple prompt); work gets up to N
         # relevant ones, with the conversation playbook kept out of that pool.
         if conversational:
-            conv = next((s for s in self.skills if s.name == "conversation"), None)
-            candidates = [conv] if conv else []
+            if chat_only:
+                candidates = []          # lean prompt already covers this
+            else:
+                conv = next((s for s in self.skills
+                             if s.name == "conversation"), None)
+                candidates = [conv] if conv else []
         else:
+            self._ensure_skill_index()   # first work turn kicks off embedding
             pool = [s for s in self.skills if s.name != "conversation"]
             candidates = select(pool, user_msg, limit=self.skills_max,
                                 index=self.skill_index)
@@ -247,9 +272,13 @@ class Agent:
         # context (playbooks, memory) rides on the user message instead. This
         # keeps Ollama's KV prefix cache valid across turns — follow-ups pay
         # prefill only for the NEW tokens, not the whole conversation again.
+        # Small talk / capability questions get the lean ~200-token prompt so
+        # the resident 3B prefills a greeting in a fraction of the tokens;
+        # anything that might need to act keeps the full toolset.
+        mode = "chat" if chat_only else "work"
         system = build_system(cwd=str(self.cwd), os_name=platform.system(),
                               tools=self.tool_docs,
-                              capabilities=self.capabilities)
+                              capabilities=self.capabilities, mode=mode)
         user_content = turn_context(
             user_msg, skills_block(picked, self.skills_inject_chars), memory_block)
 
@@ -356,10 +385,19 @@ class Agent:
             stored = "(interrupted before I did anything)"
         if stored:
             self.history.append({"role": "assistant", "content": stored})
+        if len(self.history) > self.max_history:
+            self.history = self.history[-self.max_history:]
 
         # Self-improvement — in the background so the prompt returns NOW
-        # instead of making the user wait for the reviewer model.
-        if final_answer and self.config.memory.get("auto_learn", True):
+        # instead of making the user wait for the reviewer model. Fire it only
+        # when there's plausibly something to learn: a FAILED step or a genuinely
+        # multi-step task. Skipped on conversation and on routine 1-2 step
+        # successes — the reviewer is a full inference and would otherwise
+        # occupy the single Ollama runner and slow the user's next turn.
+        worth_learning = (any(t.startswith("- FAILED") for t in trace)
+                          or len(trace) >= 3)
+        if (final_answer and self.config.memory.get("auto_learn", True)
+                and not conversational and worth_learning):
             threading.Thread(target=self._maybe_learn,
                              args=(user_msg, final_answer, tuple(trace)),
                              daemon=True).start()
@@ -367,20 +405,23 @@ class Agent:
         return final_answer
 
     def prewarm(self, role):
-        """Prefill+cache GT's REAL system prompt in the background at startup.
+        """Load the model AND cache the lean chat prompt in the background.
 
-        The old warmup sent a bare 'Reply: OK', which loads the weights but does
-        NOT cache the big system prompt — so the FIRST real turn paid the whole
-        system-prompt prefill (tens of seconds on a CPU box). Sending the exact
-        runtime system prompt now means turn 1 reuses Ollama's KV cache and only
-        prefills the short user message.
+        Two things happen here: the weights load into RAM, and the exact system
+        prompt a first turn will use gets prefilled so that turn reuses Ollama's
+        KV cache instead of re-prefilling it. We warm the CHAT prompt (not the
+        full one) because the first turn is almost always a greeting — and the
+        lean prompt is a fraction of the tokens, so the warmup itself finishes
+        sooner and "Hi" reuses it instantly. A first WORK turn still pays one
+        full-prompt prefill, which is expected for building.
         """
         def go():
             try:
                 system = build_system(cwd=str(self.cwd),
                                       os_name=platform.system(),
                                       tools=self.tool_docs,
-                                      capabilities=self.capabilities)
+                                      capabilities=self.capabilities,
+                                      mode="chat")
                 self.llm.chat(role,
                               [{"role": "system", "content": system},
                                {"role": "user", "content": "Reply: OK"}],
@@ -398,8 +439,16 @@ class Agent:
         """Re-scan skill dirs and rebuild the semantic index (after an import)."""
         self.skills = load_skills()
         if self.skills and self.skill_index is not None:
+            self._skill_index_started = True
             self._build_skill_index_async(announce=True)
         return len(self.skills)
+
+    def _ensure_skill_index(self):
+        """Start embedding the skill library on the first work turn that needs
+        it (deferred from startup so it doesn't steal CPU from the model load)."""
+        if self.skill_index is not None and not self._skill_index_started:
+            self._skill_index_started = True
+            self._build_skill_index_async()
 
     def _build_skill_index_async(self, announce=False):
         n = len(self.skills)
@@ -446,6 +495,24 @@ class Agent:
         if _CAPABILITY_Q.search(text):
             return True
         return not _CODE_HINT.search(text)
+
+    def _chat_only(self, user_msg):
+        """True only for turns that DEFINITELY need no tools — small talk and
+        capability questions. These get the lean chat system prompt.
+
+        Stricter than _is_conversational (which also drives temperature): any
+        hint of code or building keeps the FULL toolset, so a request like
+        "make an excel of Q3 sales" or "hi, read main.py" can still act. Only a
+        greeting or a "can you…/what can you do?" question — which is answered
+        from the capability list, never a tool — drops to the lean prompt.
+        """
+        from .router import _SMALL_TALK, _CODE_HINT, _PLAN_HINT
+        text = user_msg or ""
+        if _PLAN_HINT.search(text) or _CODE_HINT.search(text):
+            return False
+        if _CAPABILITY_Q.search(text) or _CHITCHAT.search(text):
+            return True
+        return len(text.strip()) < 40 and bool(_SMALL_TALK.search(text))
 
     def _turn_temperature(self, user_msg):
         """Warm for conversation, tight for code (a byte-identical prompt either

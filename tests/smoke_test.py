@@ -714,6 +714,89 @@ from gt.llm import LLM
 check("chat() default temperature is None (config-driven, not a hardcoded 0.3)",
       _inspect.signature(LLM.chat).parameters["temperature"].default is None)
 
+print("\nlean chat prompt for no-tool turns (small talk + capability Qs)")
+from gt.prompts import build_system as _bs
+_chat_p = _bs("C:/w", "Windows", "TOOLDOCS", capabilities="search the web", mode="chat")
+_work_p = _bs("C:/w", "Windows", "TOOLDOCS", capabilities="search the web", mode="work")
+check("chat prompt is far smaller than the work prompt",
+      len(_chat_p) < len(_work_p) / 2)
+check("chat prompt still states capabilities", "search the web" in _chat_p)
+check("chat prompt carries no tool docs", "TOOLDOCS" not in _chat_p)
+check("work prompt carries the tool docs", "TOOLDOCS" in _work_p)
+check("default mode is work (back-compat with 3-arg callers)",
+      _bs("C:/w", "Windows", "TOOLDOCS")
+      == _bs("C:/w", "Windows", "TOOLDOCS", mode="work"))
+check("each mode is byte-stable (KV-cache safe)",
+      _bs("C:/w", "Windows", "TOOLDOCS", capabilities="search the web",
+          mode="chat") == _chat_p)
+
+_lean_agent = Agent(llm=_StubLLM(), config=cfg, memory=_Stub(), router=_Stub(),
+                    console=_quiet, improver=_Stub(),
+                    approve=lambda *a, **k: True, ask=None)
+check("a greeting drops to the lean prompt", _lean_agent._chat_only("hi there"))
+check("'what can you do?' drops to the lean prompt",
+      _lean_agent._chat_only("what can you do?"))
+check("'can you use the internet?' drops to the lean prompt",
+      _lean_agent._chat_only("can you use the internet?"))
+check("'who are you?' drops to the lean prompt", _lean_agent._chat_only("who are you?"))
+check("'what do you think?' drops to the lean prompt",
+      _lean_agent._chat_only("what do you think about rust?"))
+check("a greeting that ALSO asks to build keeps the full toolset",
+      not _lean_agent._chat_only("hi can you build me an app"))
+check("'hi, read main.py' keeps the full toolset",
+      not _lean_agent._chat_only("hi read main.py"))
+check("a plain build request keeps the full toolset",
+      not _lean_agent._chat_only("make a todo app"))
+
+print("\nlesson extraction is skipped on conversation (Ollama runner stays free)")
+import time as _t2
+class _CountImprover:
+    def __init__(self): self.calls = 0
+    def learn(self, *a, **k): self.calls += 1; return None
+class _ProseLLM:
+    last_metrics = None
+    def chat(self, role, messages, **kw):
+        r = "Hey! How can I help?"
+        if kw.get("on_token"): kw["on_token"](r)
+        return r
+_ci = _CountImprover()
+_chat_agent = Agent(llm=_ProseLLM(), config=cfg, memory=_Stub(), router=_Stub(),
+                    console=_quiet, improver=_ci, approve=lambda *a, **k: True, ask=None)
+_chat_agent.run("hi")
+_t2.sleep(0.3)
+check("no reviewer inference fires after a plain 'hi'", _ci.calls == 0)
+_cw = _CountImprover()
+_work_agent = Agent(llm=_StubLLM(), config=cfg, memory=_Stub(), router=_Stub(),
+                    console=_quiet, improver=_cw, approve=lambda *a, **k: True, ask=None)
+_work_agent.run("fix the bug in main.py")   # 1 successful tool step, routine
+_t2.sleep(0.3)
+check("a routine 1-step success does NOT fire the reviewer", _cw.calls == 0)
+class _MultiLLM:                              # a genuinely multi-step task
+    last_metrics = None
+    def __init__(self): self.calls = 0
+    def chat(self, role, messages, **kw):
+        self.calls += 1
+        r = ('```json\n{"tool":"list_dir","args":{"path":"."}}\n```'
+             if self.calls <= 3 else "Done after several steps.")
+        if kw.get("on_token"): kw["on_token"](r)
+        return r
+_cm = _CountImprover()
+_multi_agent = Agent(llm=_MultiLLM(), config=cfg, memory=_Stub(), router=_Stub(),
+                     console=_quiet, improver=_cm, approve=lambda *a, **k: True, ask=None)
+_multi_agent.run("refactor the module across several files")
+_t2.sleep(0.3)
+check("a multi-step (>=3) task still runs lesson extraction", _cm.calls == 1)
+
+print("\nworking history is bounded (prefill stays flat over a long session)")
+_hist_agent = Agent(llm=_ProseLLM(), config=cfg, memory=_Stub(), router=_Stub(),
+                    console=_quiet, improver=_Stub(), approve=lambda *a, **k: True, ask=None)
+for _i in range(30):
+    _hist_agent.run("hello there")
+check("history never grows past the configured cap",
+      len(_hist_agent.history) <= _hist_agent.max_history)
+check("the cap keeps the most recent turns",
+      _hist_agent.history[-1]["role"] == "assistant")
+
 print("\nrouter heuristics (no LLM call) — 3B-first speed ladder")
 cfg.router["prefer_fast_on_slow"] = False   # test raw routing, hardware-independent
 r = Router(llm=None, config=cfg)

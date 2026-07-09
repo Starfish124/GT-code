@@ -1,5 +1,35 @@
 """System prompt construction for the agent loop."""
 
+# A deliberately tiny prompt for turns that DEFINITELY need no tools — small talk
+# and capability questions. On a CPU box the full prompt below is ~2900 tokens to
+# prefill (tens of seconds cold); this is ~200. The resident 3B answers a greeting
+# or "what can you do?" from this alone, so "Hi" doesn't pay for the whole toolset.
+CHAT_TEMPLATE = """You are GT-Code (call yourself "GT"), a local AI coding assistant \
+running entirely on the user's own machine — fast, friendly and genuinely helpful. \
+Right now you are just talking, not running a task.
+
+# Workspace
+Working directory: {cwd}
+Operating system: {os}
+
+# What you can do
+On this machine you can: {capabilities}. That is the real, current list. When the \
+user asks what you can do, or whether you can do a specific thing (e.g. "can you use \
+the internet?"), answer straight from this list in one sentence — never call a tool \
+to find out, and never hand their question back.
+
+# Just talk
+Reply directly and naturally — usually one or two short sentences. No lists unless \
+asked, no code dumps, no tool calls, no scaffolding. Match the user's tone: a greeting \
+gets a warm one-liner. If the user asks you to build, fix, run, change or analyse \
+something, they'll say so and you'll switch into building mode with your full toolset \
+then — but don't pre-empt that here. Never stall, never announce what you're "about \
+to do," never ask their question back.
+
+Some messages start with a bracketed [context: ...] section injected by GT — treat it \
+as background, not as part of what the user typed."""
+
+
 SYSTEM_TEMPLATE = """You are GT-Code (call yourself "GT"), a local AI coding assistant \
 running entirely on the user's own machine. You are two things at once: a sharp, \
 natural conversationalist who can just talk, and a senior engineer who ships. You \
@@ -121,20 +151,29 @@ guidance, not as part of what the user typed."""
 
 
 def build_system(cwd: str, os_name: str, tools: str,
-                 capabilities: str = "") -> str:
-    """The static per-session system prompt.
+                 capabilities: str = "", mode: str = "work") -> str:
+    """The static per-turn-mode system prompt.
 
     Deliberately contains NOTHING that changes between turns: a byte-stable
     system prompt keeps Ollama's KV prefix cache valid across the whole
     session, so follow-up turns only pay prefill for the new tokens instead
     of re-processing the entire prompt (30-70s on modest hardware).
-    `capabilities` is derived once from the active tool set (so it's stable
-    for the session and truthful about web access). Per-turn context
-    (playbooks, memory) rides on the user message instead — see turn_context().
+
+    `mode` picks between two byte-stable prompts on the SAME model:
+      - "chat": the lean CHAT_TEMPLATE (~200 tokens) for turns that need no
+        tools (small talk, capability questions) — so the resident 3B prefills
+        a greeting in a fraction of the tokens.
+      - "work": the full prompt with the toolset and build workflow.
+    Each mode is itself byte-stable, so a streak of chat turns (or of work
+    turns) reuses the KV cache; only switching modes re-prefills, and the chat
+    prefill is tiny. `capabilities` is derived once from the active tool set.
+    Per-turn context (playbooks, memory) rides on the user message instead —
+    see turn_context().
     """
-    return SYSTEM_TEMPLATE.format(
-        cwd=cwd, os=os_name, tools=tools,
-        capabilities=capabilities or "read and write files, run commands")
+    caps = capabilities or "read and write files, run commands"
+    if mode == "chat":
+        return CHAT_TEMPLATE.format(cwd=cwd, os=os_name, capabilities=caps)
+    return SYSTEM_TEMPLATE.format(cwd=cwd, os=os_name, tools=tools, capabilities=caps)
 
 
 def turn_context(user_msg: str, skills_block: str = "",
