@@ -20,14 +20,7 @@ from .router import Router
 from .improve import Improver
 from .agent import Agent
 from .permissions import Permissions
-from . import wizard, machine
-
-BANNER = r"""
-  ___ _____    ___         _
- / __|_   _|__/ __|___  __| |___
-| (_ | | |___| (__/ _ \/ _` / -_)
- \___| |_|    \___\___/\__,_\___|
-"""
+from . import wizard, machine, banner
 
 HELP = """\
 [bold]Commands[/bold]
@@ -99,16 +92,16 @@ class GTShell:
 
     def run(self):
         from . import __version__
-        self.console.print(f"[bold cyan]{BANNER}[/bold cyan]", end="")
-        self.console.print(f"[dim]  local coding agent · v{__version__}[/dim]\n")
-        self.console.print(f"[dim]workspace:[/dim] {self.agent.cwd}")
+        banner.render(self.console, __version__)
+        self.console.print(f"\n[dim]workspace:[/dim] {self.agent.cwd}")
         wizard.ensure(self.config, self.llm, self.console, self.session.prompt)
         self._startup_check()
         if self.router.prefer_fast:
             gpu = (self.router.slow_hw or {}).get("gpu") or "no GPU"
-            self.console.print(f"[dim]· CPU-only machine ({gpu}) — preferring the "
-                               f"8B for speed; /model brain forces the 14B[/dim]")
-        self._warmup(self.config.router.get("default", "fast"))
+            self.console.print(f"[dim]· CPU-only machine ({gpu}) — everyday turns "
+                               f"run on the 3B; heavy builds escalate to the 8B, "
+                               f"not the 14B (/model brain forces it)[/dim]")
+        self._warmup(self.config.router.get("default", "tiny"))
         self.console.print("\n[dim]/help for commands · /quit to exit · just "
                            "type to talk or build[/dim]\n")
         while True:
@@ -347,13 +340,16 @@ class GTShell:
             except KeyError:
                 self.console.print(f"  {role:<9} [red]unconfigured[/red]")
         if self.router.prefer_fast:
-            self.console.print("[bold]Routing[/bold]  CPU-only — 'brain' work "
-                               "goes to the 8B (fast). [dim]/model brain forces "
-                               "the 14B; set router.prefer_fast_on_slow: false to "
-                               "disable[/dim]")
+            self.console.print("[bold]Routing[/bold]  3B-first, CPU-only — "
+                               "everyday turns stay on the 3B; substantial "
+                               "builds escalate to the 8B (the 14B is skipped "
+                               "here). [dim]/model brain forces the 14B; set "
+                               "router.prefer_fast_on_slow: false to allow "
+                               "it[/dim]")
         else:
-            self.console.print("[bold]Routing[/bold]  GPU/accelerated — full "
-                               "speed ladder (8B default, 14B for planning)")
+            self.console.print("[bold]Routing[/bold]  3B-first — the resident "
+                               "3B answers everyday turns; 8B for substantial "
+                               "coding, 14B for architecture/full builds")
         self._startup_check()
 
     def _show_models(self):

@@ -24,20 +24,25 @@ models:
     provider: ollama
     model: "qwen3:14b"
 
-  # Fast general-purpose model for everyday coding.
+  # Escalation model for a substantial coding task (loaded only when needed).
   fast:
     provider: ollama
     model: "qwen3:8b"
 
-  # Tiny + instant. Used by the ROUTER to classify each request, and for trivia.
+  # The RESIDENT default: routing, chat, quick questions AND everyday coding
+  # all run on this one small model so it stays hot and nothing reloads between
+  # turns. GT only escalates to fast/brain for real builds. 3B-first = fast.
   tiny:
     provider: ollama
     model: "llama3.2:3b"
 
   # Reviews interactions and extracts reusable "lessons" (self-improving loop).
+  # Kept on the SAME 3B as 'tiny' on purpose: a bigger reviewer running in the
+  # background after each task would evict the resident model and force a reload
+  # on the next turn — the exact churn 3B-first is designed to avoid.
   reviewer:
     provider: ollama
-    model: "qwen3:8b"
+    model: "llama3.2:3b"
 
   # Embeddings for RAG / long-term memory.
   embed:
@@ -46,7 +51,12 @@ models:
 
 router:
   enabled: true         # auto-pick a model per request; toggle at runtime with /route
-  default: fast         # the 8B workhorse — brain (14B) only when reasoning is needed
+  default: tiny         # 3B-first: the resident 3B answers everyday turns; GT
+                        # escalates to fast (8B) / brain (14B) only for real
+                        # builds. One hot model = no reloads between turns.
+  escalate_len: 160     # only requests longer than this spend a classifier word
+                        # deciding whether to escalate off the 3B; short turns
+                        # answer straight on the resident model (instant).
   prefer_fast_on_slow: true  # on a CPU-only machine (no GPU) a 14B crawls at a
                              # couple tok/s, so route 'brain' work to the 8B
                              # instead. Auto-detected at startup. /model brain

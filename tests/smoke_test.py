@@ -714,24 +714,48 @@ from gt.llm import LLM
 check("chat() default temperature is None (config-driven, not a hardcoded 0.3)",
       _inspect.signature(LLM.chat).parameters["temperature"].default is None)
 
-print("\nrouter heuristics (no LLM call) — the 3B/8B/14B speed ladder")
+print("\nrouter heuristics (no LLM call) — 3B-first speed ladder")
 cfg.router["prefer_fast_on_slow"] = False   # test raw routing, hardware-independent
 r = Router(llm=None, config=cfg)
+check("router default is the resident 3B (tiny)", r.default_role == "tiny")
 check("small talk -> tiny", r.route("hi") == "tiny")
-check("everyday coding -> fast 8B", r.route("fix the bug in main.py") == "fast")
+check("everyday quick coding stays on the resident 3B (no swap)",
+      r.route("fix the bug in main.py") == "tiny")
+check("everyday frontend fix stays on the 3B",
+      r.route("fix the css on my website") == "tiny")
+check("hosting/deploy chatter stays on the 3B",
+      r.route("deploy the server to port 5000") == "tiny")
 check("architecture/planning -> brain 14B",
       r.route("design the architecture for a new app") == "brain")
 check("very long spec -> brain", r.route("please " + "explain " * 100) == "brain")
-check("router default is fast", r.default_role == "fast")
 check("new app with frontend+backend -> brain (the transcript case)",
       r.route("make a simple frontend and backend and host it") == "brain")
 check("build a react app -> brain", r.route("build a react app") == "brain")
-check("everyday frontend fix -> fast",
-      r.route("fix the css on my website") == "fast")
-check("hosting/deploy chatter -> fast, not the 3B classifier",
-      r.route("deploy the server to port 5000") == "fast")
 
-print("\nrouter prefers the 8B on slow (CPU-only) machines")
+print("\nrouter escalates only substantial, ambiguous requests (3B classifier)")
+class _RouteStub:
+    """Stands in for the tiny classifier: returns a fixed label."""
+    def __init__(self, label): self.label = label
+    def chat(self, role, messages, **kw): return self.label
+_long_code = ("Refactor the authentication module in my project to use JWT "
+              "tokens instead of sessions, and update all the related "
+              "middleware and route handlers across the whole codebase.")
+_long_reason = ("I have a big pile of customer transaction records and I want "
+                "to figure out which customers are likely to churn soon and "
+                "understand the main drivers so we can act on it early enough.")
+check("both escalation probes are past the escalate_len threshold",
+      len(_long_code) > r.escalate_len and len(_long_reason) > r.escalate_len)
+check("a substantial coding task escalates to the 8B (classifier: code)",
+      Router(llm=_RouteStub("code"), config=cfg).route(_long_code) == "fast")
+check("a substantial reasoning task escalates to the brain (classifier: complex)",
+      Router(llm=_RouteStub("complex"), config=cfg).route(_long_reason) == "brain")
+check("a long-but-simple message stays on the resident 3B",
+      Router(llm=_RouteStub("simple"), config=cfg).route(_long_reason) == "tiny")
+check("short everyday turns never call the classifier (stay on the 3B)",
+      Router(llm=_RouteStub("complex"), config=cfg).route("fix the bug in main.py")
+      == "tiny")
+
+print("\nrouter prefers the 8B over the 14B on slow (CPU-only) machines")
 from gt.machine import slow_for_large_models
 check("x86 no-GPU box is slow for large models",
       slow_for_large_models({"os": "Windows 10", "arch": "AMD64", "vram_gb": None}))
@@ -741,14 +765,36 @@ check("Apple Silicon (Metal GPU) is not flagged slow",
       not slow_for_large_models({"os": "Darwin 24.1.0", "arch": "arm64", "vram_gb": None}))
 _rslow = Router(llm=None, config=cfg)
 _rslow.prefer_fast = True
-check("slow machine downgrades brain -> fast",
+check("slow machine downgrades a build from brain -> fast (8B)",
       _rslow.route("design the architecture for a new app") == "fast")
-check("slow machine keeps everyday coding on fast",
-      _rslow.route("fix the css on my website") == "fast")
+check("slow machine still answers everyday turns on the 3B",
+      _rslow.route("fix the css on my website") == "tiny")
 check("slow machine still sends small talk to tiny",
       _rslow.route("hi") == "tiny")
 check("fast machine keeps brain for planning",
       r.route("design the architecture for a new app") == "brain")  # r has prefer_fast off
+
+print("\nstartup banner renders (3D wordmark + author + build)")
+from gt import banner as _banner
+_bc = Console(file=io.StringIO(), force_terminal=False)
+_banner.render(_bc, "9.9.9")
+_bout = _bc.file.getvalue()
+check("banner names the author", "Sarvesh Singh" in _bout)
+check("banner shows the build version", "9.9.9" in _bout)
+check("banner says 3B-first", "3B-first" in _bout)
+_orig_supports = _banner._supports_block
+_banner._supports_block = lambda c: False        # force the legacy-terminal path
+_fc = Console(file=io.StringIO(), force_terminal=False)
+_banner.render(_fc, "9.9.9")
+_fout = _fc.file.getvalue()
+_banner._supports_block = _orig_supports
+try:
+    _fout.encode("cp1252"); _legacy_ok = True    # no block chars in the fallback
+except UnicodeEncodeError:
+    _legacy_ok = False
+check("ascii fallback encodes cleanly on a legacy Windows code page (cp1252)",
+      _legacy_ok)
+check("ascii fallback still names the author", "Sarvesh Singh" in _fout)
 
 print(f"\n{'='*40}\n{ok} passed, {fail} failed")
 sys.exit(1 if fail else 0)

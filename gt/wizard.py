@@ -18,6 +18,12 @@ from rich.table import Table
 from . import machine
 
 
+# Bump when the tier→lineup mapping changes (e.g. the reviewer moved onto the
+# 3B for 3B-first). An already-set-up machine whose saved setup.json predates
+# this refreshes its lineup automatically on next launch — no manual /setup.
+SCHEMA_V = 2
+
+
 def _marker(config):
     return config.data_dir / "setup.json"
 
@@ -113,7 +119,20 @@ def ensure(config, llm, console, prompt_fn, force=False):
         pass
 
     if state.get("done") and not force:
-        _apply_lineup(config, state.get("lineup"))
+        lineup = state.get("lineup")
+        # Migrate a stale saved lineup to the current tier mapping using the
+        # SAVED hardware — no prompts, no downloads (models are already pulled).
+        # This is how the reviewer→3B move reaches machines set up before it.
+        if state.get("v") != SCHEMA_V and state.get("hardware"):
+            try:
+                rec = machine.recommend(state["hardware"])
+                lineup = rec["lineup"]
+                state.update({"v": SCHEMA_V, "tier": rec["tier"], "lineup": lineup})
+                _marker(config).write_text(json.dumps(state, indent=2),
+                                           encoding="utf-8")
+            except Exception:
+                pass
+        _apply_lineup(config, lineup)
         return
 
     def ask(q, default_yes=True):
@@ -169,7 +188,7 @@ def ensure(config, llm, console, prompt_fn, force=False):
     try:
         _marker(config).parent.mkdir(parents=True, exist_ok=True)
         _marker(config).write_text(json.dumps(
-            {"done": True, "hardware": hw, "tier": rec["tier"],
+            {"done": True, "v": SCHEMA_V, "hardware": hw, "tier": rec["tier"],
              "lineup": rec["lineup"]}, indent=2), encoding="utf-8")
     except Exception:
         pass

@@ -24,12 +24,13 @@ models:
   brain:    {provider: ollama, model: "qwen3:14b"}
   fast:     {provider: ollama, model: "qwen3:8b"}
   tiny:     {provider: ollama, model: "llama3.2:3b"}
-  reviewer: {provider: ollama, model: "qwen3:8b"}
+  reviewer: {provider: ollama, model: "llama3.2:3b"}
   embed:    {provider: ollama, model: "nomic-embed-text"}
 
 router:
   enabled: true
-  default: fast
+  default: tiny         # 3B-first: resident 3B for everyday turns, escalate
+  escalate_len: 160     # only for real builds. See config.yaml for the details.
 
 agent:
   max_steps: 20

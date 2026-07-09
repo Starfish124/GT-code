@@ -1,16 +1,20 @@
-"""Smart model routing — the speed ladder.
+"""Smart model routing — 3B-first speed ladder.
 
-    tiny (3B)  → routes requests + small talk         (instant)
-    fast (8B)  → the DEFAULT workhorse: everyday      (snappy, stays hot
-                 coding, edits, tool loops             in RAM)
-    brain (14B)→ genuine reasoning only: architecture,
-                 planning, complex multi-step design   (worth the load time)
+    tiny (3B)  → the RESIDENT DEFAULT: routing, small talk,   (instant — one
+                 questions, quick coding. Stays hot in RAM.    model, no swaps)
+    fast (8B)  → escalation for a substantial coding task      (worth a load)
+    brain (14B)→ genuine reasoning: architecture, planning,    (worth a load;
+                 building a whole app from scratch              → 8B on slow HW)
 
-Sending everything to the 14B is what makes a local agent feel slow: each
-swap can cost 10-60s of model (re)loading before the first token. So the 8B
-does the work by default and the 14B is reserved for requests that actually
-need deep reasoning. Cheap regex heuristics decide instantly; only the
-ambiguous middle costs one word from the 3B classifier.
+The thing that makes a local agent feel slow is SWAPPING models: each swap
+costs 10-60s of (re)loading before the first token, and on a CPU/iGPU box that
+can only hold one model at a time, mixing a 3B router with an 8B answerer means
+every turn reloads. So GT keeps ONE small 3B resident and answers almost
+everything with it — routing, chat, and everyday coding all hit the same hot
+model, so there are no swaps. The 8B/14B load only when a request genuinely
+needs them (a real build or deep plan). Cheap regex decides instantly; only a
+substantial, ambiguous request spends one word on the 3B classifier to decide
+whether it's worth escalating.
 """
 
 import re
@@ -52,7 +56,11 @@ class Router:
         self.config = config
         self.console = console
         self.enabled = config.router.get("enabled", True)
-        self.default_role = config.router.get("default", "fast")
+        # The resident 3B handles everyday turns; only escalate when needed.
+        self.default_role = config.router.get("default", "tiny")
+        # Longer, ambiguous requests are worth one classifier word to decide
+        # whether they should escalate off the 3B. Short turns never pay it.
+        self.escalate_len = int(config.router.get("escalate_len", 160))
 
         # On a CPU-only machine a 14B crawls (the corporate-laptop case), so
         # prefer the 8B: route work that would go to 'brain' to 'fast' instead.
@@ -86,21 +94,28 @@ class Router:
             return self.default_role
 
         # --- heuristic fast-paths (no LLM call) ---
+        # Small talk stays on the resident 3B.
         if len(text) < 40 and _SMALL_TALK.search(text):
             return "tiny"
+        # Building something / architecture / a very long spec is worth the
+        # strong model's load time (downgraded to the 8B on slow hardware).
         if _PLAN_HINT.search(text) or len(text) > 600:
             return "brain"
-        if _CODE_HINT.search(text):
-            return "fast"
 
-        # --- tiny-model classifier for the ambiguous middle ---
+        # Everything else — quick questions, small fixes, everyday coding —
+        # answers on the always-hot 3B. That's the whole point: no model swap,
+        # no reload, instant. Only a *substantial* ambiguous request is worth
+        # a classifier word to decide whether it should escalate off the 3B.
+        if len(text) <= self.escalate_len:
+            return self.default_role
         try:
             label = self._classify(text)
         except Exception:
             return self.default_role
-        return {"simple": "fast", "code": "fast", "complex": "brain"}.get(
-            label, self.default_role
-        )
+        # 'simple' quick answers stay resident; a big coding job earns the 8B;
+        # something genuinely multi-step earns the brain.
+        return {"simple": self.default_role, "code": "fast",
+                "complex": "brain"}.get(label, self.default_role)
 
     def _classify(self, text) -> str:
         messages = [

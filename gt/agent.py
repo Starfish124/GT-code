@@ -222,7 +222,11 @@ class Agent:
                            f"T={temperature:g} {'chat' if conversational else 'code'}"
                            f"[/dim]")
 
-        memory_block = self._recall(user_msg)
+        # Conversation doesn't need RAG recall — skip the embedding round-trip
+        # (and the noise of self-help lessons in small talk). Work turns still
+        # pull relevant memory/lessons. This also protects the resident 3B's
+        # warm KV cache: no extra model touched before a plain answer.
+        memory_block = "" if conversational else self._recall(user_msg)
         # Conversation gets ONLY the light conversation playbook (no heavy
         # engineering playbooks bloating a simple prompt); work gets up to N
         # relevant ones, with the conversation playbook kept out of that pool.

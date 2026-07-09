@@ -155,8 +155,10 @@ CATALOG = {
 TIERS = {
     "full": {
         "label": "Full (3B + 8B + 14B)",
+        # reviewer rides on the 3B, not the 8B: 3B-first keeps ONE model
+        # resident, and a background 8B reviewer would evict it every task.
         "lineup": {"brain": "qwen3:14b", "fast": "qwen3:8b",
-                   "tiny": "llama3.2:3b", "reviewer": "qwen3:8b",
+                   "tiny": "llama3.2:3b", "reviewer": "llama3.2:3b",
                    "embed": "nomic-embed-text"},
     },
     "standard": {
