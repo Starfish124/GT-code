@@ -533,6 +533,10 @@ check("dangerous command detected", bool(_DANGEROUS.search("rm -rf /")))
 check("plain rm is not dangerous", not _DANGEROUS.search("rm file.txt"))
 check("command_key normalises paths",
       command_key("C:\\Python\\python.exe -m pip install x") == "cmd:python")
+_alw = iter(["alw"])   # the transcript typed 'alw' and got a denial — must grant
+_pa = Permissions(Console(force_terminal=False), lambda _: next(_alw), store)
+check("'alw' is read as always-allow, not a denial",
+      _pa.approve("Run command", "npm ci", key="cmd:npm") and "cmd:npm" in _pa.grants)
 
 print("\nchained commands need a grant for EVERY segment")
 from gt.permissions import command_keys
@@ -911,14 +915,57 @@ check("Apple Silicon (Metal GPU) is not flagged slow",
       not slow_for_large_models({"os": "Darwin 24.1.0", "arch": "arm64", "vram_gb": None}))
 _rslow = Router(llm=None, config=cfg)
 _rslow.prefer_fast = True
-check("slow machine downgrades a build from brain -> fast (8B)",
-      _rslow.route("design the architecture for a new app") == "fast")
+check("slow machine keeps a build on the resident 3B (8B/14B too slow there)",
+      _rslow.route("design the architecture for a new app") == "tiny")
+check("slow machine keeps a 'make me a game' build on the 3B too",
+      _rslow.route("make me a snake game") == "tiny")
 check("slow machine still answers everyday turns on the 3B",
       _rslow.route("fix the css on my website") == "tiny")
 check("slow machine still sends small talk to tiny",
       _rslow.route("hi") == "tiny")
 check("fast machine keeps brain for planning",
       r.route("design the architecture for a new app") == "brain")  # r has prefer_fast off
+
+print("\nbuild requests are recognised (the flappy-bird miss)")
+check("'create the famous game called flappy bird' routes as a build",
+      r.route("create the famous game called flappy bird. i want to play it") == "brain")
+check("'make me a todo app' routes as a build", r.route("make me a todo app") == "brain")
+check("'build a snake game' routes as a build", r.route("build a snake game") == "brain")
+check("a build with no code-hint word is WORK, not conversation",
+      not _tagent._is_conversational("create the famous game called flappy bird")
+      and not _tagent._is_conversational("make me a todo app")
+      and not _tagent._is_conversational("build a snake game"))
+check("plain chit-chat with a creation verb stays conversation",
+      _tagent._is_conversational("write a poem")
+      and _tagent._is_conversational("make me laugh"))
+
+print("\n/mode makes behaviour strict (chat/code/plan override the classifier)")
+_rr = Router(llm=None, config=cfg)          # prefer_fast off (set above)
+_magent = Agent(llm=_StubLLM(), config=cfg, memory=_Stub(), router=_rr,
+                console=_quiet, improver=_Stub(), approve=lambda *a, **k: True, ask=None)
+check("default mode is auto", _magent.mode == "auto")
+check("set_mode normalises aliases ('coding' -> code)",
+      _magent.set_mode("coding") == "code")
+check("an unknown mode is rejected and leaves the mode unchanged",
+      _magent.set_mode("banana") is None and _magent.mode == "code")
+_magent.set_mode("chat")
+_r1, _c1, _o1, _p1 = _magent._resolve_turn("build me a todo app")
+check("chat mode forces conversation even on a build request",
+      _c1 is True and _o1 is True and _p1 == "chat" and _r1 == "tiny")
+_magent.set_mode("code")
+_r2, _c2, _o2, _p2 = _magent._resolve_turn("hi")
+check("code mode forces work (tools) even on small talk",
+      _c2 is False and _o2 is False and _p2 == "work")
+_magent.set_mode("plan")
+_r3, _c3, _o3, _p3 = _magent._resolve_turn("make a game")
+check("plan mode uses the plan prompt", _p3 == "plan" and _c3 is False)
+_magent.set_mode("auto")
+check("auto mode classifies again (a greeting is chat)",
+      _magent._resolve_turn("hi")[1] is True)
+_plan_prompt = build_system("C:/w", "Windows", "TOOLS", mode="plan")
+check("plan-mode prompt carries the plan-first directive + the tools",
+      "PLAN MODE" in _plan_prompt and "do NOT build yet" in _plan_prompt
+      and "TOOLS" in _plan_prompt)
 
 print("\nstartup banner renders (3D wordmark + author + build)")
 from gt import banner as _banner

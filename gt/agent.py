@@ -192,6 +192,9 @@ class Agent:
         self.cwd = Path.cwd()
         self.history = []          # [{role, content}] — user msgs + final answers
         self.force_role = None     # set via /model to pin a model
+        # Interaction mode: 'auto' classifies each turn; chat/code/plan make the
+        # behaviour STRICT and predictable (set with /mode). See _resolve_turn.
+        self.mode = "auto"
         # Learned preferences (set by the shell from the Profiler at startup;
         # session-stable so it rides in the prompt without breaking the cache)
         # and a lightweight per-session request log the analyst reads later.
@@ -236,14 +239,14 @@ class Agent:
     # ---- public API ---------------------------------------------------------
 
     def run(self, user_msg):
-        role = self.force_role or self.router.route(user_msg)
-        conversational = self._is_conversational(user_msg)
-        # chat_only (small talk / capability Qs) is the strict subset that gets
-        # the lean, no-tools prompt AND no injected playbook — the lean prompt
-        # already carries the conversation guidance, so injecting it is waste.
-        chat_only = self._chat_only(user_msg)
+        # In auto mode GT classifies the turn; a forced /mode bypasses that so a
+        # coding session never slips back into "conversation" and refuses to act
+        # (the flappy-bird failure). chat_only is the strict subset that gets the
+        # lean, no-tools prompt AND no injected playbook.
+        role, conversational, chat_only, prompt_mode = self._resolve_turn(user_msg)
         temperature = self._chat_temp() if conversational else self._task_temp()
-        self.console.print(f"[dim]· routed to [bold {PURPLE}]{role}[/bold {PURPLE}]"
+        prefix = f"[{self.mode} mode] " if self.mode != "auto" else ""
+        self.console.print(f"[dim]· {prefix}[bold {PURPLE}]{role}[/bold {PURPLE}]"
                            f"[dim] ({self.config.model_for(role)['model']}) · "
                            f"T={temperature:g} {'chat' if conversational else 'code'}"
                            f"[/dim]")
@@ -280,11 +283,11 @@ class Agent:
         # prefill only for the NEW tokens, not the whole conversation again.
         # Small talk / capability questions get the lean ~200-token prompt so
         # the resident 3B prefills a greeting in a fraction of the tokens;
-        # anything that might need to act keeps the full toolset.
-        mode = "chat" if chat_only else "work"
+        # anything that might need to act keeps the full toolset. plan mode adds
+        # a plan-first directive (see prompts.build_system).
         system = build_system(cwd=str(self.cwd), os_name=platform.system(),
                               tools=self.tool_docs,
-                              capabilities=self.capabilities, mode=mode,
+                              capabilities=self.capabilities, mode=prompt_mode,
                               profile=self.profile_summary)
         user_content = turn_context(
             user_msg, skills_block(picked, self.skills_inject_chars), memory_block)
@@ -510,9 +513,12 @@ class Agent:
         fall back to the router's code signal. Drives both temperature and
         whether engineering playbooks get injected.
         """
-        from .router import _CODE_HINT, _PLAN_HINT
+        from .router import _CODE_HINT, _PLAN_HINT, _BUILD_HINT
         text = user_msg or ""
-        if _PLAN_HINT.search(text):
+        # A build request ("make me a todo app", "create the famous game called
+        # flappy bird") is WORK even with no code-hint word in it — this is the
+        # flappy-bird miss that dropped a build onto the conversation playbook.
+        if _PLAN_HINT.search(text) or _BUILD_HINT.search(text):
             return False
         if _CAPABILITY_Q.search(text):
             return True
@@ -528,13 +534,51 @@ class Agent:
         greeting or a "can you…/what can you do?" question — which is answered
         from the capability list, never a tool — drops to the lean prompt.
         """
-        from .router import _SMALL_TALK, _CODE_HINT, _PLAN_HINT
+        from .router import _SMALL_TALK, _CODE_HINT, _PLAN_HINT, _BUILD_HINT
         text = user_msg or ""
-        if _PLAN_HINT.search(text) or _CODE_HINT.search(text):
+        if (_PLAN_HINT.search(text) or _CODE_HINT.search(text)
+                or _BUILD_HINT.search(text)):
             return False
         if _CAPABILITY_Q.search(text) or _CHITCHAT.search(text):
             return True
         return len(text.strip()) < 40 and bool(_SMALL_TALK.search(text))
+
+    MODES = ("auto", "chat", "code", "plan")
+
+    def set_mode(self, mode):
+        """Set the interaction mode; returns the canonical name or None."""
+        m = (mode or "").strip().lower()
+        m = {"conversation": "chat", "conversational": "chat", "talk": "chat",
+             "coding": "code", "build": "code", "planning": "plan"}.get(m, m)
+        if m not in self.MODES:
+            return None
+        self.mode = m
+        return m
+
+    def _forced_role(self, preferred):
+        """Model role for a forced code/plan mode: the preferred model, but
+        capped back to the resident 3B on a slow box (and 'tiny' if absent)."""
+        if preferred not in self.config.models:
+            preferred = "tiny"
+        return self.router._cap(preferred)
+
+    def _resolve_turn(self, user_msg):
+        """(role, conversational, chat_only, prompt_mode) for this turn.
+
+        auto → classify the message. A forced mode is STRICT: it ignores the
+        classifier so behaviour is predictable (a coding session stays coding).
+        A /model pin still wins over the mode's default model.
+        """
+        if self.mode == "chat":
+            return (self.force_role or "tiny"), True, True, "chat"
+        if self.mode == "code":
+            return (self.force_role or self._forced_role("fast")), False, False, "work"
+        if self.mode == "plan":
+            return (self.force_role or self._forced_role("brain")), False, False, "plan"
+        role = self.force_role or self.router.route(user_msg)
+        conversational = self._is_conversational(user_msg)
+        chat_only = self._chat_only(user_msg)
+        return role, conversational, chat_only, ("chat" if chat_only else "work")
 
     def _turn_temperature(self, user_msg):
         """Warm for conversation, tight for code (a byte-identical prompt either

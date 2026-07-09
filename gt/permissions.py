@@ -114,13 +114,17 @@ class Permissions:
         except (EOFError, KeyboardInterrupt):
             return False
 
-        if ans in ("a", "always") and keys and not dangerous:
+        # Match on the first letter so 'a', 'al', 'alw', 'always' all grant and
+        # 'y'/'yes'/'yeah' all allow — the transcript showed 'alw' being read as
+        # a denial, which is maddening.
+        first = ans[:1]
+        if first == "a" and keys and not dangerous:
             self.grants.update(keys)
             self._save()
             self.console.print(f"[green]ok: {', '.join(keys)} allowed from now "
                                f"on (manage with /permissions)[/green]")
             return True
-        return ans in ("y", "yes")
+        return first == "y"
 
     # ---- management (the /permissions command) -------------------------------
 

@@ -38,6 +38,8 @@ HELP = """\
   /setup             re-run first-launch setup (evaluate machine, download models)
   /doctor            show this machine's hardware + which models are live
   /models            list the model ids Ollama is actually serving
+  /mode [chat|code|plan|auto]  force GT's behaviour: chat = only talk, code =
+                     always build, plan = plan first, auto = decide per message
   /model <role|off>  pin a model role (brain/fast/tiny) or 'off' to auto-route
   /turbo [on|off]    swap the resident model to a 1B for maximum speed (revert
                      with /turbo off) — great on a slow/CPU-only machine
@@ -57,7 +59,7 @@ HELP = """\
   /lessons           show lessons GT has learned about itself
   /memory            memory stats
   /forget <kind|all> clear memory (kinds: note, lesson, doc)
-  /reset             clear the current conversation history
+  /reset  /clear     clear the current conversation history
   /quit  /exit       leave
 
 Anything else is talk or work. Ask a question and GT just answers; ask for a
@@ -131,7 +133,7 @@ class GTShell:
                            "type to talk or build[/dim]\n")
         while True:
             try:
-                text = self.session.prompt(_PROMPT).strip()
+                text = self.session.prompt(self._prompt_str()).strip()
             except EOFError:                 # Ctrl-D: leave, but learn first
                 self._finish()
                 self.console.print("bye")
@@ -172,6 +174,8 @@ class GTShell:
             self._show_models()
         elif cmd == "/model":
             self._set_model(arg)
+        elif cmd == "/mode":
+            self._mode(arg)
         elif cmd == "/turbo":
             self._turbo(arg)
         elif cmd == "/benchmark":
@@ -220,7 +224,7 @@ class GTShell:
             self._memory_stats()
         elif cmd == "/forget":
             self._forget(arg)
-        elif cmd == "/reset":
+        elif cmd in ("/reset", "/clear"):
             self.agent.reset()
             self.console.print("conversation history cleared.")
         else:
@@ -402,6 +406,39 @@ class GTShell:
                 table.add_row(f"[red]{e}[/red]")
             self.console.print(table)
         self.console.print("[dim]Copy the exact ids into config.yaml under models:[/dim]")
+
+    def _prompt_str(self):
+        """The gt› prompt, tagged with the mode when it isn't auto (gt[code]›)."""
+        m = self.agent.mode
+        tag = "" if m == "auto" else f"[{m}]"
+        return HTML(f'<b><style fg="{PURPLE.lower()}">gt{tag}› </style></b>')
+
+    def _mode(self, arg):
+        """/mode [auto|chat|code|plan] — force GT's behaviour, or show it."""
+        if not arg:
+            self.console.print(
+                f"mode: [bold {PURPLE}]{self.agent.mode}[/bold {PURPLE}]   "
+                f"[dim](auto · chat · code · plan)[/dim]\n"
+                f"[dim]auto = GT decides per message  ·  chat = only talk, never "
+                f"builds  ·  code = always build (full tools, keeps going)  ·  "
+                f"plan = propose a plan first and wait for your go-ahead. "
+                f"Set with /mode <name>.[/dim]")
+            return
+        m = self.agent.set_mode(arg)
+        if not m:
+            self.console.print("[yellow]unknown mode. try: auto, chat, code, "
+                               "plan[/yellow]")
+            return
+        blurb = {
+            "auto": "GT decides per message.",
+            "chat": "conversation only — GT will not build.",
+            "code": "always coding — full tools, builds without asking to start.",
+            "plan": "planning — GT proposes a plan and waits for your go-ahead.",
+        }[m]
+        self.console.print(f"mode → [bold {PURPLE}]{m}[/bold {PURPLE}]  "
+                           f"[dim]{blurb}[/dim]")
+        if m in ("code", "plan"):   # pre-load the model this mode will use
+            self._warmup(self.agent._forced_role("fast" if m == "code" else "brain"))
 
     def _set_model(self, arg):
         if arg in ("off", ""):

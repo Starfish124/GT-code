@@ -44,16 +44,31 @@ _CODE_HINT = re.compile(
     r"\.html|\.css|\.xlsx|\.pptx|\.docx|traceback)\b",
     re.I,
 )
+# "Make me a <thing>" — a concrete build request. A creation verb anywhere
+# ahead of a known deliverable in the same sentence. Deliberately tolerant of
+# the article ("a/an/the/this/my/another/…" or none) and of words in between,
+# because "create THE famous game called flappy bird" is every bit a build as
+# "make me a todo app" — the rigid old pattern missed exactly that and dropped
+# it onto the 3B as small talk (the flappy-bird bug).
+_BUILD_HINT = re.compile(
+    r"\b(make|build|create|write|implement|develop|generate|program|"
+    r"scaffold|set ?up|put together|whip up|spin up|clone|recreate|remake)\b"
+    r"[^.?!]*?\b(app|application|web ?site|web ?page|landing page|page|"
+    r"frontend|back ?end|full[- ]?stack|api|service|micro-?service|game|tool|"
+    r"cli|dashboard|bot|script|program|server|database|db|extension|plugin|"
+    r"feature|function|class|component|module|form|endpoint|ui|clone|"
+    r"prototype|widget|calculator|to-?do|chat ?bot|scraper|crawler|"
+    r"spreadsheet|excel|powerpoint|deck|slides?|word doc(ument)?)s?\b",
+    re.I,
+)
 # Signals that real REASONING is needed -> brain 14B is worth its load time.
 # Checked BEFORE _CODE_HINT: starting something new is a planning task even
 # when it mentions code words ("make a simple frontend and backend").
 _PLAN_HINT = re.compile(
-    r"\b(architect(ure)?|design|plan|blueprint|from scratch|new (app|project|"
-    r"service|platform)|build me|overhaul|rewrite (the )?(whole|entire)|"
-    r"migrate|restructure|complex|strategy|trade-?offs?|compare .* approaches|"
-    r"full-?stack|"
-    r"(make|build|create|write)\s+(me\s+)?an?\s+(\w+[- ]){0,3}?(app|application|"
-    r"website|site|page|frontend|backend|api|service|game|tool|dashboard|bot)s?)\b",
+    r"\b(architect(ure)?|blueprint|from scratch|new (app|project|"
+    r"service|platform)|overhaul|rewrite (the )?(whole|entire)|"
+    r"migrate|restructure|strategy|trade-?offs?|compare .* approaches|"
+    r"full[- ]?stack platform|design the (architecture|system))\b",
     re.I,
 )
 
@@ -88,9 +103,14 @@ class Router:
         return self._cap(self._pick(user_msg))
 
     def _cap(self, role) -> str:
-        """Downgrade 'brain' to 'fast' on a slow machine (if 'fast' exists)."""
-        if self.prefer_fast and role == "brain" and "fast" in self.config.models:
-            return "fast"
+        """On a slow (CPU-only) box the 8B AND 14B both crawl — single-digit
+        tok/s, minutes per turn (a real transcript showed the 8B at 2 tok/s with
+        a 4.5-minute prefill). There's no usable escalation there, so keep
+        EVERYTHING on the resident 3B for responsiveness. /model fast|brain still
+        forces a bigger (slower) model when the user is willing to wait."""
+        if self.prefer_fast and role in ("brain", "fast") \
+                and "tiny" in self.config.models:
+            return "tiny"
         return role
 
     def _pick(self, user_msg) -> str:
@@ -105,9 +125,10 @@ class Router:
         # Small talk stays on the resident 3B.
         if len(text) < 40 and _SMALL_TALK.search(text):
             return "tiny"
-        # Building something / architecture / a very long spec is worth the
-        # strong model's load time (downgraded to the 8B on slow hardware).
-        if _PLAN_HINT.search(text) or len(text) > 600:
+        # Architecture / planning / a very long spec earns the 14B; a concrete
+        # "make me a <thing>" build earns a strong coding model too. Both are
+        # capped back to the resident 3B on a slow box (see _cap).
+        if _PLAN_HINT.search(text) or _BUILD_HINT.search(text) or len(text) > 600:
             return "brain"
 
         # Everything else — quick questions, small fixes, everyday coding —
