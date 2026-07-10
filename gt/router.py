@@ -103,14 +103,16 @@ class Router:
         return self._cap(self._pick(user_msg))
 
     def _cap(self, role) -> str:
-        """On a slow (CPU-only) box the 8B AND 14B both crawl — single-digit
-        tok/s, minutes per turn (a real transcript showed the 8B at 2 tok/s with
-        a 4.5-minute prefill). There's no usable escalation there, so keep
-        EVERYTHING on the resident 3B for responsiveness. /model fast|brain still
-        forces a bigger (slower) model when the user is willing to wait."""
-        if self.prefer_fast and role in ("brain", "fast") \
-                and "tiny" in self.config.models:
-            return "tiny"
+        """On a slow (CPU-only) box the 14B truly crawls (a real transcript
+        showed minutes per turn), so 'brain' work runs on the 8B there
+        instead. The 8B is slower than the resident 3B but the user decided a
+        REAL BUILD is worth its load time — the 3B kept shipping PowerPoints
+        for games — so builds are NOT capped down to the 3B (everyday turns
+        never reach _cap escalated; they default to tiny in _pick).
+        /model brain still forces the 14B when the user will wait."""
+        if self.prefer_fast and role == "brain" \
+                and "fast" in self.config.models:
+            return "fast"
         return role
 
     def _pick(self, user_msg) -> str:

@@ -939,11 +939,13 @@ check("Apple Silicon (Metal GPU) is not flagged slow",
       not slow_for_large_models({"os": "Darwin 24.1.0", "arch": "arm64", "vram_gb": None}))
 _rslow = Router(llm=None, config=cfg)
 _rslow.prefer_fast = True
-check("slow machine keeps a build on the resident 3B (8B/14B too slow there)",
-      _rslow.route("design the architecture for a new app") == "tiny")
-check("slow machine keeps a 'make me a game' build on the 3B too",
-      _rslow.route("make me a snake game") == "tiny")
-check("slow machine still answers everyday turns on the 3B",
+check("slow machine runs architecture/plan work on the 8B, not the 14B",
+      _rslow.route("design the architecture for a new app") == "fast")
+check("slow machine escalates a 'make me a game' BUILD to the 8B "
+      "(user decision: a real build is worth the load — the 3B kept "
+      "shipping PowerPoints for games)",
+      _rslow.route("make me a snake game") == "fast")
+check("slow machine still answers everyday turns on the resident 3B",
       _rslow.route("fix the css on my website") == "tiny")
 check("slow machine still sends small talk to tiny",
       _rslow.route("hi") == "tiny")
@@ -2171,6 +2173,22 @@ _hint = _install_hint("python-pptx")
 check("office install hint tells the model the exact run_command to use",
       "run_command" in _hint and "-m pip install python-pptx" in _hint
       and sys.executable in _hint)
+
+print("\nesc-to-interrupt plumbing")
+from gt.interrupt import esc_interrupts
+_esc_ok = True
+try:
+    with esc_interrupts():      # stdin is not a tty here -> must no-op
+        pass
+except Exception:
+    _esc_ok = False
+check("esc watcher no-ops cleanly on a non-interactive stdin", _esc_ok)
+from gt.ui import _Waiting
+check("the waiting spinner advertises esc",
+      "esc interrupts" in _Waiting("x").__rich__().plain)
+from gt.ui import _tail_text
+check("the streaming footer advertises esc",
+      "esc interrupts" in _tail_text("some partial reply").plain)
 
 print("\nstartup banner renders (3D wordmark + author + build)")
 from gt import banner as _banner

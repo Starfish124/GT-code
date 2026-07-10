@@ -34,9 +34,10 @@ TURBO_MODEL = "llama3.2:1b"
 
 HELP = """\
 [bold]Commands[/bold]
-  ctrl-c             interrupt the running turn (GT keeps the work done so
-                     far — say 'continue' to resume); at an empty prompt,
-                     press it twice to quit
+  esc                interrupt the reply being generated (GT keeps the work
+                     done so far — say 'continue' to resume)
+  ctrl-c             same, and works anywhere (during commands too); at an
+                     empty prompt, press it twice to quit
   /help              show this help
   /setup             re-run first-launch setup (evaluate machine, download models)
   /doctor            show this machine's hardware + which models are live
@@ -148,8 +149,8 @@ class GTShell:
         self.console.print(f"\n[dim]Try:[/dim] [{PURPLE}]what can you do?[/{PURPLE}]"
                            f"   [dim]·[/dim]   [{PURPLE}]build me a todo app[/{PURPLE}]"
                            f"   [dim]·[/dim]   [{PURPLE}]/benchmark[/{PURPLE}]")
-        self.console.print("[dim]/help for commands · /quit to exit · ctrl-c "
-                           "interrupts a running turn · just type to talk or "
+        self.console.print("[dim]/help for commands · /quit to exit · esc "
+                           "interrupts a running reply · just type to talk or "
                            "build[/dim]\n")
         ctrlc_armed = False   # Ctrl-C at the prompt: press twice to quit
         while True:

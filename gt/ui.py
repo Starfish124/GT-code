@@ -22,6 +22,8 @@ from rich.live import Live
 from rich.markdown import Markdown
 from rich.text import Text
 
+from .interrupt import esc_interrupts
+
 
 class _Buffer:
     __slots__ = ("text",)
@@ -52,7 +54,7 @@ class _Waiting:
         else:
             hint = "  (large prompt on CPU is slow — this is prompt-reading, not stuck)"
         return Text(f"{frame} {self.label} — {elapsed:.1f}s{hint}"
-                    f"  · ctrl-c interrupts", style="dim")
+                    f"  · esc interrupts", style="dim")
 
 
 # How much of the in-progress reply the live preview shows: a few lines, like
@@ -67,7 +69,7 @@ def _tail_text(full: str) -> Text:
     tail = "\n".join(lines)[-_TAIL_CHARS:]
     head = "… " if len(full) > len(tail) else ""
     t = Text(head + tail, style="dim")
-    t.append("\n· generating — ctrl-c interrupts (work so far is kept)",
+    t.append("\n· generating — esc interrupts (work so far is kept)",
              style="dim italic")
     return t
 
@@ -88,9 +90,12 @@ def streaming_markdown(console, refresh_per_second: int = 10,
     state = {"rendered": 0}
 
     try:
-        with Live(console=console, auto_refresh=True,
-                  refresh_per_second=refresh_per_second,
-                  transient=True) as live:
+        # Esc stops the generation (same handling as Ctrl-C) — active only
+        # while the model is talking, so it can never eat a keystroke meant
+        # for a permission prompt.
+        with esc_interrupts(), Live(console=console, auto_refresh=True,
+                                    refresh_per_second=refresh_per_second,
+                                    transient=True) as live:
 
             live.update(_Waiting(waiting_label))
 
