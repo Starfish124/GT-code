@@ -1642,6 +1642,362 @@ _ppans = _ppa.run("build me a game")
 check("a plan that announces future work is accepted, not nudged",
       _ppllm.stream_calls == 1 and _ppans and _ppans.startswith("Plan:"))
 
+print("\nhybrid tool protocol (native function calling + prompt fallback)")
+from gt.agent import native_calls
+from gt.tools import tool_specs, ALL_TOOLS
+from gt.prompts import (PROMPT_TOOL_PROTOCOL, NATIVE_TOOL_PROTOCOL)
+import json as _json
+
+# -- Tool.spec(): the native function-calling schema, built from `args` -----
+_rf_spec = REGISTRY["read_file"].spec()
+check("spec has the function-calling shape",
+      _rf_spec["type"] == "function"
+      and _rf_spec["function"]["name"] == "read_file"
+      and _rf_spec["function"]["parameters"]["type"] == "object")
+check("spec marks required args", _rf_spec["function"]["parameters"]["required"] == ["path"])
+_rc_spec = REGISTRY["run_command"].spec()["function"]["parameters"]
+check("run_command spec types timeout/background properly",
+      _rc_spec["properties"]["timeout"]["type"] == "integer"
+      and _rc_spec["properties"]["background"]["type"] == "boolean"
+      and _rc_spec["required"] == ["command"])
+_td_spec = REGISTRY["write_todos"].spec()["function"]["parameters"]
+check("write_todos spec is a real array schema with a status enum",
+      _td_spec["properties"]["todos"]["type"] == "array"
+      and _td_spec["properties"]["todos"]["items"]["properties"]["status"]["enum"]
+      == ["pending", "doing", "done"])
+check("write_file's native description drops the fenced-block trick",
+      "fenced" not in REGISTRY["write_file"].spec()["function"]["description"]
+      and "content" in REGISTRY["write_file"].spec()
+      ["function"]["parameters"]["required"])
+_all_specs = tool_specs()
+check("every tool builds a JSON-serializable spec with all its args",
+      len(_all_specs) == len(ALL_TOOLS)
+      and _json.dumps(_all_specs)
+      and all(set(t.args) == set(s["function"]["parameters"]["properties"])
+              for t, s in zip(ALL_TOOLS, _all_specs)))
+
+# -- native_calls(): normalizing Ollama's raw tool_calls ---------------------
+check("native calls normalize to GT's {tool, args} form",
+      native_calls([{"function": {"name": "read_file",
+                                  "arguments": {"path": "a.py"}}}])
+      == [{"tool": "read_file", "args": {"path": "a.py"}}])
+check("string-encoded arguments are parsed (same repair as prompt path)",
+      native_calls([{"function": {"name": "write_todos",
+                                  "arguments": '{"todos": []}'}}])
+      == [{"tool": "write_todos", "args": {"todos": []}}])
+check("nameless / broken entries are dropped, not crashed",
+      native_calls([{"function": {"arguments": {"x": 1}}}, None,
+                    {"function": {"name": "list_dir",
+                                  "arguments": "not json"}}])
+      == [{"tool": "list_dir", "args": {}}])
+check("no calls -> empty list", native_calls(None) == [])
+
+# -- LLM plumbing: tools ride in the payload; /api/show detects support ------
+import gt.llm as _llm_mod
+import requests as _real_requests
+
+class _FakeResp:
+    def __init__(self, obj, status=200):
+        self._obj = obj
+        self.status_code = status
+        self.text = ""
+    def json(self):
+        return self._obj
+
+class _FakeRequests:
+    exceptions = _real_requests.exceptions
+    def __init__(self, route):
+        self.route = route          # (url, payload) -> response obj
+        self.posts = []             # (url, payload)
+    def post(self, url, json=None, timeout=None, stream=False):
+        self.posts.append((url, json))
+        return _FakeResp(self.route(url, json))
+
+def _show_route(caps):
+    def route(url, payload):
+        if url.endswith("/api/show"):
+            return {"capabilities": caps}
+        # like a real model: tool calls only come back when tools were sent
+        msg = {"content": "hi"}
+        if payload and payload.get("tools"):
+            msg["tool_calls"] = [{"function": {"name": "read_file",
+                                               "arguments": {"path": "a"}}}]
+        return {"message": msg}
+    return route
+
+_fake = _FakeRequests(_show_route(["completion", "tools"]))
+_orig_requests = _llm_mod.requests
+_llm_mod.requests = _fake
+try:
+    _l = _llm_mod.LLM(cfg)
+    check("supports_tools reads Ollama's capabilities", _l.supports_tools("tiny") is True)
+    _l.supports_tools("tiny")
+    check("support answer is cached (one /api/show per model)",
+          sum(1 for u, _ in _fake.posts if u.endswith("/api/show")) == 1)
+    check("/api/show is asked on the native endpoint, not /v1",
+          all("/v1/" not in u for u, _ in _fake.posts))
+    _out = _l.chat("tiny", [{"role": "user", "content": "x"}], stream=False,
+                   tools=[{"type": "function"}])
+    _chat_payloads = [p for u, p in _fake.posts if u.endswith("/api/chat")]
+    check("tools ride in the /api/chat payload when passed",
+          _chat_payloads[-1].get("tools") == [{"type": "function"}])
+    check("tool calls land normalized-shape in last_tool_calls",
+          _out == "hi" and _l.last_tool_calls[0]["function"]["name"] == "read_file")
+    _l.chat("tiny", [{"role": "user", "content": "x"}], stream=False)
+    _chat_payloads = [p for u, p in _fake.posts if u.endswith("/api/chat")]
+    check("no tools param -> no tools key, and last_tool_calls resets",
+          "tools" not in _chat_payloads[-1] and _l.last_tool_calls == [])
+
+    _fake2 = _FakeRequests(_show_route(["completion"]))
+    _llm_mod.requests = _fake2
+    _l2 = _llm_mod.LLM(cfg)
+    check("a template without tool support -> prompt fallback",
+          _l2.supports_tools("tiny") is False)
+
+    def _boom_route(url, payload):
+        raise _real_requests.exceptions.ConnectionError("down")
+    _llm_mod.requests = _FakeRequests(_boom_route)
+    _l3 = _llm_mod.LLM(cfg)
+    check("an unreachable Ollama -> prompt fallback, no crash",
+          _l3.supports_tools("tiny") is False)
+finally:
+    _llm_mod.requests = _orig_requests
+
+# -- the system prompt per protocol ------------------------------------------
+_p_native = build_system("C:/w", "Windows", "TOOLDOCS", protocol="native")
+_p_prompt = build_system("C:/w", "Windows", "TOOLDOCS", protocol="prompt")
+check("native prompt drops the fenced-JSON instructions and the tool list",
+      "```json" not in _p_native and "TOOLDOCS" not in _p_native
+      and "# Available tools" not in _p_native)
+check("native prompt keeps the behavioural rules",
+      "# Running commands" in _p_native
+      and "function-calling interface" in _p_native)
+check("prompt protocol keeps the portable fenced-JSON instructions",
+      "```json" in _p_prompt and "TOOLDOCS" in _p_prompt)
+check("each protocol prompt is byte-stable (KV cache)",
+      _p_native == build_system("C:/w", "Windows", "TOOLDOCS", protocol="native"))
+check("chat mode is protocol-agnostic",
+      build_system("C:/w", "Windows", "T", mode="chat", protocol="native")
+      == build_system("C:/w", "Windows", "T", mode="chat"))
+check("config ships tool_protocol: auto",
+      str(cfg.agent.get("tool_protocol", "")).lower() == "auto"
+      and "tool_protocol" in __import__("gt.config", fromlist=["DEFAULT_CONFIG"]).DEFAULT_CONFIG)
+
+# -- agent loop end-to-end on the NATIVE path ---------------------------------
+class _NativeLLM:
+    last_metrics = None
+    def __init__(self):
+        self.calls = 0
+        self.last_tool_calls = []
+        self.saw_tools = []
+        self.systems = []
+        self.result_roles = []
+    def supports_tools(self, role):
+        return True
+    def chat(self, role, messages, **kw):
+        self.calls += 1
+        self.saw_tools.append(bool(kw.get("tools")))
+        self.systems.append(messages[0]["content"])
+        if self.calls > 1:
+            self.result_roles.append(messages[-1]["role"])
+        if self.calls == 1:
+            self.last_tool_calls = [
+                {"function": {"name": "write_todos", "arguments":
+                    {"todos": [{"task": "a", "status": "doing"}]}}},
+                {"function": {"name": "list_dir",
+                              "arguments": {"path": "."}}}]
+            reply = ""
+        else:
+            self.last_tool_calls = []
+            reply = "Done natively."
+        if kw.get("on_token") and reply:
+            kw["on_token"](reply)
+        return reply
+
+_nllm = _NativeLLM()
+_nagent = Agent(llm=_nllm, config=Config.load(), memory=_Stub(),
+                router=_Stub(), console=_quiet, improver=_Stub(),
+                approve=lambda *a, **k: True, ask=None)
+_nanswer = _nagent.run("plan the work")
+check("native turn passes the tool specs to the model",
+      _nllm.saw_tools[0] is True)
+check("native calls execute (several from one response, in order)",
+      _nagent.todos == [{"task": "a", "status": "doing"}]
+      and _nanswer == "Done natively.")
+check("native results go back as role='tool' messages",
+      _nllm.result_roles and _nllm.result_roles[0] == "tool")
+check("native turn gets the native system prompt",
+      "function-calling interface" in _nllm.systems[0]
+      and "```json" not in _nllm.systems[0])
+check("the digest still records native steps",
+      "write_todos" in _nagent.history[-1]["content"]
+      and "list_dir" in _nagent.history[-1]["content"])
+
+# forcing tool_protocol: prompt overrides a capable model
+_fp_cfg = Config.load()
+_fp_cfg.data["agent"]["tool_protocol"] = "prompt"
+_fpllm = _StubLLM()
+_fpllm.supports_tools = lambda role: True
+_fpagent = Agent(llm=_fpllm, config=_fp_cfg, memory=_Stub(), router=_Stub(),
+                 console=_quiet, improver=_Stub(),
+                 approve=lambda *a, **k: True, ask=None)
+check("tool_protocol: prompt forces the fallback even on a capable model",
+      _fpagent._use_native("fast") is False)
+check("a stub LLM with no probe stays on the prompt protocol (back-compat)",
+      _nagent.tool_protocol == "auto"
+      and Agent(llm=_StubLLM(), config=Config.load(), memory=_Stub(),
+                router=_Stub(), console=_quiet, improver=_Stub(),
+                approve=lambda *a, **k: True, ask=None)._use_native("fast")
+      is False)
+
+# a native-mode model that still writes its call as text JSON gets repaired
+class _TextInNativeLLM:
+    last_metrics = None
+    last_tool_calls = []
+    def __init__(self):
+        self.calls = 0
+    def supports_tools(self, role):
+        return True
+    def chat(self, role, messages, **kw):
+        self.calls += 1
+        reply = ('```json\n{"tool":"write_todos","args":{"todos":'
+                 '[{"task":"t","status":"doing"}]}}\n```'
+                 if self.calls == 1 else "Repaired and done.")
+        if kw.get("on_token"):
+            kw["on_token"](reply)
+        return reply
+
+_tnagent = Agent(llm=_TextInNativeLLM(), config=Config.load(), memory=_Stub(),
+                 router=_Stub(), console=_quiet, improver=_Stub(),
+                 approve=lambda *a, **k: True, ask=None)
+check("text-JSON in native mode is executed anyway (liberal repair)",
+      _tnagent.run("plan the work") == "Repaired and done."
+      and _tnagent.todos == [{"task": "t", "status": "doing"}])
+
+# -- leaked native-format calls in TEXT (observed live on llama3.2) ----------
+check("a leaked {'name','parameters'} call parses when the tool is known",
+      extract_tool_call('{"name": "read_file", "parameters": {"path": "a.py"}}',
+                        known={"read_file": None})
+      == {"tool": "read_file", "args": {"path": "a.py"}})
+check("the 'arguments' spelling works too",
+      extract_tool_call('{"name": "list_dir", "arguments": {}}',
+                        known={"list_dir": None})
+      == {"tool": "list_dir", "args": {}})
+check("string args are normalized at extraction (attach_content_block safe)",
+      extract_tool_call('{"tool": "write_file", '
+                        '"args": "{\\"path\\": \\"x\\"}"}')["args"]
+      == {"path": "x"})
+check("an unknown name does NOT match (ordinary JSON stays an answer)",
+      extract_tool_call('{"name": "John Smith", "parameters": {"age": 4}}',
+                        known={"read_file": None}) is None
+      and extract_tool_call('{"name": "read_file", "parameters": {}}') is None)
+class _LeakLLM:
+    """Native-capable model that leaks an UNPARSEABLE native-format call as
+    text (the live turn-2 failure) — must be nudged at the right channel."""
+    last_metrics = None
+    last_tool_calls = []
+    def __init__(self):
+        self.calls = 0
+        self.nudges = []
+    def supports_tools(self, role):
+        return True
+    def chat(self, role, messages, **kw):
+        self.calls += 1
+        if self.calls > 1:
+            self.nudges.append(messages[-1]["content"])
+        reply = ('{"name": "write_todos", "parameters": {"todos": "["broken'
+                 if self.calls == 1 else "Recovered — done.")
+        if kw.get("on_token"):
+            kw["on_token"](reply)
+        return reply
+
+_lkllm = _LeakLLM()
+_lkagent = Agent(llm=_lkllm, config=Config.load(), memory=_Stub(),
+                 router=_Stub(), console=_quiet, improver=_Stub(),
+                 approve=lambda *a, **k: True, ask=None)
+_lkanswer = _lkagent.run("fix the imports in main.py")
+check("an unparseable leaked native call gets the native-channel nudge",
+      any("function-calling interface" in n for n in _lkllm.nudges)
+      and _lkanswer == "Recovered — done.")
+
+# -- digest mimicry: a faked bookkeeping block is a stall, not an answer -----
+class _MimicLLM:
+    last_metrics = None
+    def __init__(self):
+        self.calls = 0
+        self.nudges = []
+    def chat(self, role, messages, **kw):
+        self.calls += 1
+        if self.calls > 1:
+            self.nudges.append(messages[-1]["content"])
+        reply = ("Done!\n\n[actions taken this turn]\n"
+                 "- write_file(x.html) -> OK: wrote 100 chars"
+                 if self.calls == 1 else "Fixed the typo for real.")
+        if kw.get("on_token"):
+            kw["on_token"](reply)
+        return reply
+
+_mimllm = _MimicLLM()
+_mimagent = Agent(llm=_mimllm, config=Config.load(), memory=_Stub(),
+                  router=_Stub(), console=_quiet, improver=_Stub(),
+                  approve=lambda *a, **k: True, ask=None)
+_mimanswer = _mimagent.run("fix the typo in readme.md")
+check("a faked '[actions taken this turn]' block is nudged, not accepted",
+      any("performs NOTHING" in n for n in _mimllm.nudges)
+      and _mimanswer == "Fixed the typo for real.")
+check("a faked '[tool result:' block is a mimicry stall too",
+      _mimagent._stall_reason("[tool result: read_file]\nstuff", []) == "mimicry")
+
+# -- the tool-message shapes survive context fitting --------------------------
+_tmsgs = ([{"role": "system", "content": "SYS"}]
+          + [{"role": "tool", "tool_name": "run_command",
+              "content": "head\n" + "y" * 8000} for _ in range(6)]
+          + [{"role": "assistant", "content": "", "tool_calls": []},
+             {"role": "user", "content": "latest"}])
+check("native tool-role messages get compacted under context pressure",
+      _fit(_FakeAgent(), _tmsgs) is True and len(_tmsgs[1]["content"]) < 1000)
+
+# -- sub-agent on the native path ---------------------------------------------
+from gt.subagent import run_subagent as _run_sub_native
+
+class _SubNativeLLM:
+    last_metrics = None
+    def __init__(self):
+        self.calls = 0
+        self.last_tool_calls = []
+        self.saw_tools = []
+        self.result_roles = []
+        self.systems = []
+    def supports_tools(self, role):
+        return True
+    def chat(self, role, messages, **kw):
+        self.calls += 1
+        self.saw_tools.append(bool(kw.get("tools")))
+        self.systems.append(messages[0]["content"])
+        if self.calls > 1:
+            self.result_roles.append(messages[-1]["role"])
+        if self.calls == 1:
+            self.last_tool_calls = [{"function": {
+                "name": "list_dir", "arguments": {"path": "."}}}]
+            return ""
+        self.last_tool_calls = []
+        return "REPORT: one file, x.py."
+
+with _tf.TemporaryDirectory() as _sntd:
+    (Path(_sntd) / "x.py").write_text("pass", encoding="utf-8")
+    _snllm = _SubNativeLLM()
+    _snreport, _snsteps = _run_sub_native(
+        _snllm, Config.load(), _Stub(), Path(_sntd).resolve(),
+        "what files are here?", "tiny")
+    check("sub-agent uses native calling on a capable model",
+          _snllm.saw_tools[0] is True and _snsteps == 1
+          and _snreport.startswith("REPORT"))
+    check("sub-agent native results are role='tool' messages",
+          _snllm.result_roles and _snllm.result_roles[0] == "tool")
+    check("sub-agent native prompt drops the fenced-JSON instructions",
+          "```json" not in _snllm.systems[0]
+          and "# Available tools" not in _snllm.systems[0])
+
 print("\nstartup banner renders (3D wordmark + author + build)")
 from gt import banner as _banner
 _bc = Console(file=io.StringIO(), force_terminal=False)

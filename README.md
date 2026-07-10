@@ -251,10 +251,15 @@ non-interactive instead of hanging on an invisible prompt.
 code signals → `brain`); only ambiguous requests cost a one-word
 classification from the 3B model. Pin with `/model brain`.
 
-**Agent loop** (`gt/agent.py`). A **prompt-based JSON tool protocol** (not
-native function-calling) so it behaves identically across Qwen and Llama. The
-model emits one JSON block per tool call; GT runs it, feeds back the result,
-loops until a plain-text answer. Output streams as live markdown (`gt/ui.py`).
+**Agent loop** (`gt/agent.py`). A **hybrid tool protocol**: on models whose
+chat template supports it (asked of Ollama once per model), tool calls go
+through **native function calling** — structured, no JSON-in-prose to break —
+with results fed back as real `tool`-role messages; everywhere else GT falls
+back to the portable **prompt-based JSON protocol** (one fenced block per
+call), so it still works on any model. `agent.tool_protocol` in config.yaml
+(`auto`/`native`/`prompt`) forces a side; `/doctor` shows which protocol each
+model gets. Either way GT runs the call, feeds back the result, and loops
+until a plain-text answer. Output streams as live markdown (`gt/ui.py`).
 
 **Documents** (`gt/office.py`). `create_excel` (openpyxl — bold headers,
 auto-width, frozen header row), `create_powerpoint` (python-pptx — title

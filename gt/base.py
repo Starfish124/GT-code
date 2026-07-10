@@ -34,7 +34,38 @@ class Tool:
     name = ""
     description = ""
     args: dict = {}          # arg_name -> human description
+    arg_types: dict = {}     # arg_name -> JSON-schema fragment; default string
+    required: tuple = ()     # arg names the model MUST supply
     changes_system = False   # if True, requires approval
+
+    # Some descriptions are protocol-specific (write_file's fenced content
+    # block only exists in the prompt-JSON protocol) — this overrides what the
+    # native function-calling spec advertises. None = use `description`.
+    native_description = None
 
     def run(self, args: dict, ctx: Ctx) -> str:
         raise NotImplementedError
+
+    def spec(self) -> dict:
+        """This tool as a native function-calling spec (Ollama/OpenAI shape).
+
+        Built from the SAME `args` descriptions the prompt protocol shows, so
+        the two protocols never drift apart; `arg_types` adds real JSON types
+        where "string" is wrong (booleans, numbers, arrays)."""
+        props = {}
+        for arg, desc in self.args.items():
+            p = dict(self.arg_types.get(arg) or {"type": "string"})
+            p.setdefault("description", desc)
+            props[arg] = p
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.native_description or self.description,
+                "parameters": {
+                    "type": "object",
+                    "properties": props,
+                    "required": list(self.required),
+                },
+            },
+        }

@@ -34,6 +34,7 @@ router:
 agent:
   max_steps: 20
   auto_approve: false
+  tool_protocol: auto   # native function calling where supported, else prompt-JSON
 
 performance:
   thinking: false

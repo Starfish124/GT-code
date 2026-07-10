@@ -108,7 +108,34 @@ adding new ones; read a neighbouring file when unsure.
 or missing; pick one clear error shape and reuse it.
 - Leave it runnable: end with the exact command (or file to open) that proves it works.
 
-# How to use tools
+{tool_protocol}
+
+# Running commands
+- Every run_command starts fresh in the workspace root: `cd` does NOT carry \
+over to the next command. To work inside a subfolder, pass "cwd". The same \
+goes for environment activation: `activate` does not persist — call a venv's \
+binaries directly (venv/bin/pip, venv\\Scripts\\python).
+- Package installs / scaffolds / builds can be slow — pass a bigger "timeout" \
+(e.g. 600) instead of letting them get killed.
+- A dev server or watcher NEVER exits, so running it normally always times \
+out. Start it with "background": true, then check_process to read its output \
+and verify it actually serves (fetch the URL / curl an endpoint).
+- Commands cannot answer interactive prompts. Always pass non-interactive \
+flags (-y, --yes, explicit --template etc.); a command that asks a question \
+will just hang until killed.
+
+Some user messages start with bracketed [context: ...] sections (expert \
+playbooks, remembered lessons) injected by GT — treat them as background \
+guidance, not as part of what the user typed. Bracketed blocks like \
+[tool result: ...] and [actions taken this turn] are bookkeeping GT writes \
+AFTER you act — never write one yourself; writing the block does not perform \
+the action."""
+
+
+# The portable protocol: tool calls as fenced JSON in the reply text, parsed
+# by GT. Works on ANY model — this is the fallback when the served model's
+# chat template has no native tool support.
+PROMPT_TOOL_PROTOCOL = """# How to use tools
 When you need to act on the machine, respond with ONE fenced json block and \
 nothing else:
 
@@ -141,31 +168,40 @@ the frontend…") or by asking whether to proceed — either make the tool call,
 or report what you actually DID. Execute the whole task in one go, tool call \
 after tool call, without stopping to check in.
 
-# Running commands
-- Every run_command starts fresh in the workspace root: `cd` does NOT carry \
-over to the next command. To work inside a subfolder, pass "cwd". The same \
-goes for environment activation: `activate` does not persist — call a venv's \
-binaries directly (venv/bin/pip, venv\\Scripts\\python).
-- Package installs / scaffolds / builds can be slow — pass a bigger "timeout" \
-(e.g. 600) instead of letting them get killed.
-- A dev server or watcher NEVER exits, so running it normally always times \
-out. Start it with "background": true, then check_process to read its output \
-and verify it actually serves (fetch the URL / curl an endpoint).
-- Commands cannot answer interactive prompts. Always pass non-interactive \
-flags (-y, --yes, explicit --template etc.); a command that asks a question \
-will just hang until killed.
-
 # Available tools
-{tools}
+{tools}"""
 
-Some user messages start with bracketed [context: ...] sections (expert \
-playbooks, remembered lessons) injected by GT — treat them as background \
-guidance, not as part of what the user typed."""
+
+# The native protocol: the model's own function-calling interface carries the
+# calls (Ollama tools=[...]); the tool list and argument schemas ride in the
+# API request, so they are NOT repeated here.
+NATIVE_TOOL_PROTOCOL = """# How to use tools
+Your tools are attached to this conversation natively — call them through \
+the function-calling interface. NEVER write a tool call as JSON or code in \
+your reply text: text is only for talking to the user.
+
+Rules:
+- Call one tool at a time and act on its result before the next (calling a \
+few in sequence is fine when the order is certain and none depends on \
+another's result).
+- write_file takes the COMPLETE file body in its "content" argument — write \
+the whole file, never a placeholder.
+- To edit a file, read_file it first so your `find` text matches exactly.
+- When you are finished, reply in normal prose with NO tool call — that \
+final message is what the user sees as your answer.
+- Keep going with tools until the task is actually done; don't stop to ask \
+permission for routine steps (the tools handle approval themselves). Only \
+ask_user for genuine decisions the user must make.
+- NEVER end a reply by announcing what you are about to do ("I'll now create \
+the frontend…") or by asking whether to proceed — either make the tool call, \
+or report what you actually DID. Execute the whole task in one go, tool call \
+after tool call, without stopping to check in."""
 
 
 def build_system(cwd: str, os_name: str, tools: str,
                  capabilities: str = "", mode: str = "work",
-                 profile: str = "", project_memory: str = "") -> str:
+                 profile: str = "", project_memory: str = "",
+                 protocol: str = "prompt") -> str:
     """The static per-turn-mode system prompt.
 
     Deliberately contains NOTHING that changes between turns: a byte-stable
@@ -183,6 +219,12 @@ def build_system(cwd: str, os_name: str, tools: str,
     prefill is tiny. `capabilities` is derived once from the active tool set.
     Per-turn context (playbooks, memory) rides on the user message instead —
     see turn_context().
+
+    `protocol` picks how tool calls are made: "prompt" embeds the fenced-JSON
+    instructions and the tool list (portable, any model); "native" assumes the
+    tools ride in the API request (Ollama tools=[...]) and only carries the
+    behavioural rules. The protocol is per-model, so it only changes when the
+    model does — the KV cache was invalid at that point anyway.
     """
     caps = capabilities or "read and write files, run commands"
     # A short, session-stable "about this user" block learned by the analyst
@@ -202,7 +244,10 @@ def build_system(cwd: str, os_name: str, tools: str,
           f"and facts. They are authoritative for THIS project: follow them "
           f"over your generic defaults, and don't re-derive what they already "
           f"tell you.\n\n{project_memory}" if project_memory else "")
-    work = SYSTEM_TEMPLATE.format(cwd=cwd, os=os_name, tools=tools, capabilities=caps)
+    proto = (NATIVE_TOOL_PROTOCOL if protocol == "native"
+             else PROMPT_TOOL_PROTOCOL.format(tools=tools))
+    work = SYSTEM_TEMPLATE.format(cwd=cwd, os=os_name, capabilities=caps,
+                                  tool_protocol=proto)
     if mode == "plan":
         return work + PLAN_DIRECTIVE + pm + prof
     return work + pm + prof

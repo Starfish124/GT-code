@@ -53,26 +53,87 @@ def _scan_objects(text):
         idx = start + consumed
 
 
-def extract_tool_call(text):
-    """Return one valid {"tool": ...} object from the text, or None.
+def _norm_args(args):
+    """Coerce a call's args to a dict — models sometimes JSON-encode the
+    whole dict as a string (observed live on the 3B). Normalized HERE, at
+    extraction, so everything downstream (attach_content_block, hooks, the
+    digest) can rely on a dict."""
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except ValueError:
+            return {}
+    return args if isinstance(args, dict) else {}
+
+
+def _as_tool_call(obj, known=None):
+    """Normalize one parsed JSON object into {"tool", "args"} — or None.
+
+    Accepts GT's own {"tool", "args"} shape, and — when `known` names the
+    available tools — the {"name", "parameters"/"arguments"} shape models
+    trained on native function calling leak into their TEXT (observed live:
+    llama3.2 answered with its native-format call as prose). Requiring the
+    name to be a known tool keeps ordinary JSON in answers from matching.
+    """
+    if not isinstance(obj, dict):
+        return None
+    if "tool" in obj:
+        obj["args"] = _norm_args(obj.get("args", {}))
+        return obj
+    name = obj.get("name")
+    if known is not None and isinstance(name, str) and name in known:
+        args = obj.get("arguments", obj.get("parameters", {}))
+        return {"tool": name, "args": _norm_args(args)}
+    return None
+
+
+def extract_tool_call(text, known=None):
+    """Return one valid tool call parsed out of the text, or None.
 
     Fenced blocks win (last one — models think first, then act). Otherwise
     scan for bare JSON objects and take the FIRST tool call, so a spray of
-    several calls executes sequentially, one per agent step.
+    several calls executes sequentially, one per agent step. `known` (an
+    iterable of tool names) additionally unlocks the leaked native-format
+    shape — see _as_tool_call.
     """
     for block in reversed(_FENCE.findall(text)):
         try:
             obj = json.loads(block)
         except Exception:
             continue
-        if isinstance(obj, dict) and "tool" in obj:
-            obj.setdefault("args", {})
-            return obj
+        call = _as_tool_call(obj, known)
+        if call:
+            return call
     for obj in _scan_objects(text):
-        if isinstance(obj, dict) and "tool" in obj:
-            obj.setdefault("args", {})
-            return obj
+        call = _as_tool_call(obj, known)
+        if call:
+            return call
     return None
+
+
+def native_calls(raw):
+    """Normalize Ollama-shape tool calls into GT's {"tool", "args"} form.
+
+    Ollama returns [{"function": {"name": ..., "arguments": {...}}}, ...];
+    arguments occasionally arrive as a JSON string instead of an object (same
+    small-model failure the prompt protocol repairs in _run_tool), so both are
+    accepted. Nameless entries are dropped.
+    """
+    calls = []
+    for item in raw or []:
+        fn = (item or {}).get("function") or {}
+        name = fn.get("name")
+        if not name:
+            continue
+        args = fn.get("arguments")
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except ValueError:
+                args = {}
+        calls.append({"tool": name,
+                      "args": args if isinstance(args, dict) else {}})
+    return calls
 
 
 # Any fenced block (```lang\n…```) — used to lift raw write_file content.
@@ -176,6 +237,20 @@ _NUDGE = {
     "echo":   ("[system] You are repeating your previous message without "
                "acting. Stop announcing. Make the next tool call now, or "
                "use ask_user if you are blocked on a real decision."),
+    "mimicry": ("[system] You WROTE a bookkeeping block ('[actions taken "
+                "this turn]' / '[tool result: ...]') as your reply. Those "
+                "blocks are written by GT AFTER you actually call a tool — "
+                "writing one yourself performs NOTHING; no file was touched, "
+                "no command ran. Do the work for real now: make the actual "
+                "tool call, or answer in plain prose with no bracketed "
+                "blocks."),
+    # badjson, but the turn runs on NATIVE function calling — 're-send a json
+    # block' would be the wrong advice, so point at the right channel.
+    "badjson_native": ("[system] You wrote a tool call as TEXT, but it did "
+                       "not parse. On this model tool calls go through the "
+                       "native function-calling interface — never as JSON in "
+                       "your reply. Make the call properly now, or reply in "
+                       "plain prose if the task is done."),
 }
 
 
@@ -249,6 +324,13 @@ class Agent:
         # Tools available this session (web tools dropped if web.enabled=false).
         self.tools = {t.name: t for t in active_tools(config)}
         self.tool_docs = tool_docs(self.tools.values())
+        # Tool protocol (roadmap #7): 'auto' uses NATIVE function calling on
+        # models whose chat template supports it (asked of Ollama once per
+        # model) and falls back to the portable prompt-JSON protocol
+        # everywhere else; 'native'/'prompt' force one side.
+        self.tool_protocol = str(
+            config.agent.get("tool_protocol", "auto")).lower()
+        self.tool_specs = [t.spec() for t in self.tools.values()]
         # A truthful "what you can do" clause built from the active tools —
         # so GT answers capability questions instead of asking them.
         self.capabilities = capability_summary(self.tools.values())
@@ -288,10 +370,15 @@ class Agent:
         # (already-loaded) model — context isolation without swap churn.
         self._turn_role = role
         temperature = self._chat_temp() if conversational else self._task_temp()
+        # Hybrid tool protocol: native function calling when this turn's model
+        # supports it (a per-model fact — asked of Ollama once and cached),
+        # the portable prompt-JSON everywhere else. Chat turns carry no tools.
+        native = prompt_mode != "chat" and self._use_native(role)
         prefix = f"[{self.mode} mode] " if self.mode != "auto" else ""
         self.console.print(f"[dim]· {prefix}[bold {PURPLE}]{role}[/bold {PURPLE}]"
                            f"[dim] ({self.config.model_for(role)['model']}) · "
                            f"T={temperature:g} {'chat' if conversational else 'code'}"
+                           f"{' · native tools' if native else ''}"
                            f"[/dim]")
 
         # Confidence gate: before a NEW build starts, weigh the plausible
@@ -361,7 +448,8 @@ class Agent:
                               tools=self.tool_docs,
                               capabilities=self.capabilities, mode=prompt_mode,
                               profile=self.profile_summary,
-                              project_memory=self.project_memory)
+                              project_memory=self.project_memory,
+                              protocol="native" if native else "prompt")
         # Re-inject the current checklist on work turns so the model re-reads
         # its plan every turn (this is the "external memory" that survives across
         # 'continue' and any compaction — the flappy-bird fix).
@@ -412,18 +500,33 @@ class Agent:
                     ) as (on_token, _buf):
                         reply = self.llm.chat(role, messages, stream=True,
                                               temperature=temperature,
-                                              on_token=on_token)
+                                              on_token=on_token,
+                                              tools=(self.tool_specs
+                                                     if native else None))
                 except LLMError as e:
                     self.console.print(f"[red]LLM error:[/red] {e}")
                     return
                 self._print_timing()
 
-                messages.append({"role": "assistant", "content": reply})
-                call = extract_tool_call(reply)
-                if call:
-                    attach_content_block(call, reply)
+                # Native path: the calls arrive structured through the API —
+                # nothing to parse, and several may come in one response.
+                # Prompt path: parse ONE fenced-JSON call out of the reply.
+                raw_calls = (list(getattr(self.llm, "last_tool_calls", None)
+                                  or []) if native else [])
+                if raw_calls:
+                    # Keep Ollama's own shape in the message so the model's
+                    # chat template re-renders its calls on later steps.
+                    messages.append({"role": "assistant", "content": reply,
+                                     "tool_calls": raw_calls})
+                    calls = native_calls(raw_calls)
+                else:
+                    # Also the native-mode repair: a confused model that
+                    # writes its call as text JSON still gets it executed.
+                    messages.append({"role": "assistant", "content": reply})
+                    call = extract_tool_call(reply, known=self.tools)
+                    calls = [attach_content_block(call, reply)] if call else []
 
-                if not call:
+                if not calls:
                     # Small models stall in three recognizable ways instead
                     # of finishing: give-up prose after a FAILED step,
                     # announcing work without doing it ('I'll now create…'),
@@ -438,15 +541,36 @@ class Agent:
                         nudged.add(stall)
                         self.console.print(f"[dim]· GT stalled ({stall}) — "
                                            f"nudging it to act[/dim]")
+                        nudge = ("badjson_native"
+                                 if (stall == "badjson" and native) else stall)
                         messages.append({"role": "user",
-                                         "content": _NUDGE[stall]})
+                                         "content": _NUDGE[nudge]})
                         continue
                     final_answer = reply.strip()
                     break
 
-                observation = self._run_tool(call, ctx)
-                trace.append(digest_line(call["tool"], call.get("args") or {},
-                                         observation))
+                for call in calls:
+                    observation = self._run_tool(call, ctx)
+                    trace.append(digest_line(call["tool"],
+                                             call.get("args") or {},
+                                             observation))
+                    # Cap what goes back into context — huge tool outputs slow
+                    # every later step's prefill without adding much signal.
+                    if len(observation) > 6000:
+                        observation = (observation[:6000]
+                                       + "\n... [truncated for context]")
+                    if raw_calls:
+                        # Native calls get native results: the tool role is
+                        # what the model's chat template was trained on.
+                        messages.append({"role": "tool",
+                                         "tool_name": call["tool"],
+                                         "content": observation})
+                    else:
+                        messages.append({
+                            "role": "user",
+                            "content": (f"[tool result: {call['tool']}]"
+                                        f"\n{observation}"),
+                        })
 
                 # Claude-Code-style system-reminder: a multi-step task with no
                 # checklist is how the model loses the plan (it made a PowerPoint
@@ -460,15 +584,6 @@ class Agent:
                         "multi-step task with no checklist. Call write_todos now "
                         "with the FULL plan, then work through it one item at a "
                         "time — do not try to hold the whole plan in your head.")})
-
-                # Cap what goes back into context — huge tool outputs slow
-                # every later step's prefill without adding much signal.
-                if len(observation) > 6000:
-                    observation = observation[:6000] + "\n... [truncated for context]"
-                messages.append({
-                    "role": "user",
-                    "content": f"[tool result: {call['tool']}]\n{observation}",
-                })
             else:
                 self.console.print(
                     f"[yellow]Reached the step limit ({self.max_steps}) — "
@@ -750,6 +865,24 @@ class Agent:
         chat_only = self._chat_only(user_msg)
         return role, conversational, chat_only, ("chat" if chat_only else "work")
 
+    def _use_native(self, role):
+        """Native function calling for this role's model? (config + probe)
+
+        'auto' asks the LLM client whether the served model's template
+        supports tools (cached per model); anything that can't answer —
+        including stub LLMs in tests — means the portable prompt protocol."""
+        if self.tool_protocol == "prompt":
+            return False
+        if self.tool_protocol == "native":
+            return True
+        probe = getattr(self.llm, "supports_tools", None)
+        if not callable(probe):
+            return False
+        try:
+            return bool(probe(role))
+        except Exception:
+            return False
+
     def _turn_temperature(self, user_msg):
         """Warm for conversation, tight for code (a byte-identical prompt either
         way, so Ollama's KV cache is unaffected)."""
@@ -759,14 +892,25 @@ class Agent:
     def _stall_reason(self, text, trace):
         """Classify a no-tool-call reply that shouldn't end the turn.
 
-        Returns 'badjson' | 'failed' | 'intent' | 'echo' | None. None means
-        the reply is a legitimate final answer.
+        Returns 'badjson' | 'failed' | 'intent' | 'echo' | 'mimicry' | None.
+        None means the reply is a legitimate final answer.
         """
+        # Digest mimicry (observed live on the 3B): with a digest in history,
+        # the model EMITS a fake '[actions taken this turn]' / '[tool result:'
+        # block as its answer instead of acting. Checked first — a mimicked
+        # digest is a corrupted answer in every mode, plan turns included.
+        if ("[actions taken this turn]" in text
+                or text.lstrip().startswith("[tool result")):
+            return "mimicry"
         # A reply that contains '"tool"' but parsed to no call is an
         # ATTEMPTED tool call with broken JSON (models truncate long
         # write_file contents) — without this it becomes the 'final answer'
-        # as a raw JSON blob.
-        if '"tool"' in text and "{" in text:
+        # as a raw JSON blob. The '"name"' variant is the leaked native
+        # function-calling shape (llama-style) with unparseable arguments.
+        if "{" in text and ('"tool"' in text
+                            or ('"name"' in text
+                                and ('"parameters"' in text
+                                     or '"arguments"' in text))):
             return "badjson"
         # A plan turn's whole job is prose that ANNOUNCES future work and
         # stops — the intent/failed nudges would shove it into building
@@ -892,13 +1036,16 @@ class Agent:
         """
         budget = int(self.config.performance.get("num_ctx", 8192)) - 1024
         def over():
-            return sum(len(m["content"]) for m in messages) // 4 > budget
+            return sum(len(m.get("content") or "") for m in messages) // 4 > budget
         if not over():
             return False
         compacted = False
+        # Tool observations under either protocol: '[tool result:' user
+        # messages (prompt-JSON) or role='tool' messages (native).
         tool_idx = [i for i, m in enumerate(messages)
-                    if m["role"] == "user"
-                    and m["content"].startswith("[tool result:")]
+                    if m["role"] == "tool"
+                    or (m["role"] == "user"
+                        and (m.get("content") or "").startswith("[tool result:"))]
         for i in (tool_idx[:-keep_recent] if keep_recent else tool_idx):
             if not over():
                 break

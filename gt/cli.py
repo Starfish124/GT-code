@@ -434,11 +434,22 @@ class GTShell:
             + (f" ({hw['vram_gb']} GB VRAM)" if hw['vram_gb'] else ""))
         self.console.print(f"[bold]Verdict[/bold]  {rec['reason']}")
         self.console.print("[bold]Line-up[/bold]")
+        proto_cfg = str(self.config.agent.get("tool_protocol", "auto")).lower()
         for role in ("brain", "fast", "tiny", "reviewer", "analyst", "embed"):
             try:
                 spec = self.config.model_for(role)
+                proto = ""
+                if role in ("brain", "fast", "tiny"):
+                    try:
+                        nat = (proto_cfg != "prompt"
+                               and (proto_cfg == "native"
+                                    or self.llm.supports_tools(role)))
+                    except Exception:
+                        nat = False
+                    proto = ("  [dim]· native tools[/dim]" if nat
+                             else "  [dim]· prompt-json tools[/dim]")
                 self.console.print(f"  {role:<9} {spec['model']}  "
-                                   f"[dim]({spec['provider']})[/dim]")
+                                   f"[dim]({spec['provider']})[/dim]{proto}")
             except KeyError:
                 self.console.print(f"  {role:<9} [red]unconfigured[/red]")
         if self.router.prefer_fast:

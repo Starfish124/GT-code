@@ -46,6 +46,7 @@ class ReadFile(Tool):
     name = "read_file"
     description = "Read and return the contents of a text file."
     args = {"path": "File path (relative to the workspace, or absolute)."}
+    required = ("path",)
 
     def run(self, args, ctx):
         p = ctx.resolve(args["path"])
@@ -69,6 +70,10 @@ class WriteFile(Tool):
                    "second fenced code block right after the json block.")
     args = {"path": "File path.",
             "content": "Full text to write (or use a content block instead)."}
+    required = ("path", "content")
+    # The fenced content block is a prompt-protocol escape hatch; natively the
+    # arguments arrive structured, so content is just a normal argument.
+    native_description = "Create or overwrite a file with the given content."
     changes_system = True
 
     def run(self, args, ctx):
@@ -93,6 +98,7 @@ class EditFile(Tool):
         "find": "Exact text to find (must be unique in the file).",
         "replace": "Text to replace it with.",
     }
+    required = ("path", "find", "replace")
     changes_system = True
 
     def run(self, args, ctx):
@@ -145,6 +151,7 @@ class SearchFiles(Tool):
         "query": "Text to search for.",
         "path": "Directory to search under (default: workspace root).",
     }
+    required = ("query",)
 
     # NOTE: no bare "data" here — user projects legitimately have data/
     # folders. Only GT's OWN data dir (memory db, logs) is skipped, by path.
@@ -300,6 +307,9 @@ class RunCommand(Tool):
                       "server, watcher) and return immediately. Inspect it "
                       "later with check_process / stop_process.",
     }
+    arg_types = {"timeout": {"type": "integer"},
+                 "background": {"type": "boolean"}}
+    required = ("command",)
     changes_system = True
 
     def run(self, args, ctx):
@@ -410,6 +420,8 @@ class CheckProcess(Tool):
     description = ("Check a background process started by run_command: is it "
                    "still running, and what has it printed so far.")
     args = {"id": "The process id returned when it was started."}
+    arg_types = {"id": {"type": "integer"}}
+    required = ("id",)
 
     def run(self, args, ctx):
         entry = self._entry(args)
@@ -437,6 +449,8 @@ class StopProcess(Tool):
     name = "stop_process"
     description = "Stop a background process started by run_command."
     args = {"id": "The process id returned when it was started."}
+    arg_types = {"id": {"type": "integer"}}
+    required = ("id",)
 
     def run(self, args, ctx):
         entry = CheckProcess._entry(args)
@@ -483,6 +497,7 @@ class AskUser(Tool):
                    "Don't use it for permission to run tools — those handle "
                    "approval themselves.")
     args = {"question": "The question to ask (keep it short and concrete)."}
+    required = ("question",)
 
     MAX_PER_TURN = 3
 
@@ -526,6 +541,19 @@ class WriteTodos(Tool):
         "of trying to hold every step in your head.")
     args = {"todos": 'List of {"task": <short text>, "status": '
                      '"pending"|"doing"|"done"}.'}
+    arg_types = {"todos": {
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "task": {"type": "string"},
+                "status": {"type": "string",
+                           "enum": ["pending", "doing", "done"]},
+            },
+            "required": ["task"],
+        },
+    }}
+    required = ("todos",)
 
     _STATUS = {"pending", "doing", "done"}
 
@@ -575,6 +603,7 @@ class RunAgent(Tool):
                    "just read them yourself.")
     args = {"task": "the job — one clear, self-contained brief; include any "
                     "paths/names you already know"}
+    required = ("task",)
 
     def run(self, args, ctx):
         task = str(args.get("task") or "").strip()
@@ -591,6 +620,7 @@ class Recall(Tool):
     description = ("Search long-term memory (notes, lessons, indexed docs) for "
                    "anything relevant to a query.")
     args = {"query": "What to look up."}
+    required = ("query",)
 
     def run(self, args, ctx):
         hits = ctx.memory.search(args.get("query", ""), k=6)
@@ -623,6 +653,7 @@ class WebSearch(Tool):
     description = ("Search the web (DuckDuckGo) and return the top results as "
                    "title / url / snippet. Use when you need current info.")
     args = {"query": "What to search for."}
+    required = ("query",)
 
     def run(self, args, ctx):
         query = args.get("query", "").strip()
@@ -670,6 +701,7 @@ class WebFetch(Tool):
     description = ("Fetch a URL and return its readable text (HTML stripped). "
                    "Use to read a page found via web_search.")
     args = {"url": "The URL to fetch."}
+    required = ("url",)
 
     def run(self, args, ctx):
         url = args.get("url", "").strip()
@@ -782,3 +814,9 @@ def tool_docs(tools=None) -> str:
         flag = "  (asks for approval)" if t.changes_system else ""
         lines.append(f'- {t.name}: {t.description}{flag}\n    args: {{{arg_str}}}')
     return "\n".join(lines)
+
+
+def tool_specs(tools=None) -> list:
+    """The toolset as native function-calling specs, for Ollama's tools=[...]
+    parameter (defaults to all tools). See Tool.spec()."""
+    return [t.spec() for t in (tools if tools is not None else ALL_TOOLS)]

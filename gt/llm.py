@@ -4,8 +4,9 @@ GT talks to Ollama's NATIVE /api/chat endpoint: that unlocks keep_alive (models
 stay hot in RAM between requests instead of being evicted), think=false (Qwen3's
 hidden reasoning mode off by default — the single biggest latency win), and
 precise per-request metrics (model load time, prefill time, generation tok/s)
-that GT surfaces to the user. Embeddings and model listing use Ollama's
-OpenAI-compatible /v1 endpoints.
+that GT surfaces to the user — and native function calling (tools=[...]) on
+models whose chat template supports it (see supports_tools). Embeddings and
+model listing use Ollama's OpenAI-compatible /v1 endpoints.
 """
 
 import json
@@ -20,6 +21,8 @@ class LLM:
     def __init__(self, config):
         self.config = config
         self.last_metrics = None  # timing of the most recent chat call
+        self.last_tool_calls = []  # native tool calls from the most recent chat
+        self._tools_cache = {}     # (base_url, model) -> supports native tools?
 
     def _perf(self, key, default):
         return getattr(self.config, "performance", {}).get(key, default)
@@ -27,29 +30,63 @@ class LLM:
     # ---- chat ---------------------------------------------------------------
 
     def chat(self, role, messages, stream=True, temperature=None,
-             on_token=None, timeout=600):
+             on_token=None, timeout=600, tools=None):
         """Return the assistant's full text. If stream=True, on_token(str) is
         called with each incremental chunk as it arrives. Timing details of
         the call land in self.last_metrics.
 
         temperature=None uses the configured task default (performance.
         temperature); callers pass an explicit value to override — the agent
-        runs conversation warmer than code, the router classifies at 0."""
+        runs conversation warmer than code, the router classifies at 0.
+
+        tools: optional list of native function-calling specs (Tool.spec()).
+        Any tool calls the model emits land in self.last_tool_calls, in
+        Ollama's raw shape ([{"function": {"name", "arguments"}}, ...])."""
         if temperature is None:
             temperature = float(self._perf("temperature", 0.3))
         spec = self.config.model_for(role)
         self.last_metrics = None
+        self.last_tool_calls = []
         try:
             return self._chat_ollama(spec, messages, stream, temperature,
-                                     on_token, timeout)
+                                     on_token, timeout, tools)
         except requests.exceptions.ConnectionError:
             raise LLMError(self._conn_msg(spec))
         except requests.exceptions.Timeout:
             raise LLMError(f"'{spec['model']}' timed out after {timeout}s.")
 
+    def supports_tools(self, role):
+        """Does this role's model support NATIVE function calling?
+
+        Asks Ollama's /api/show once per model and caches the answer: modern
+        Ollamas list the model's capabilities ("tools" among them) straight
+        from its chat template. Anything unclear — old Ollama, no capabilities
+        field, unreachable — is False, so GT falls back to the prompt-JSON
+        protocol that works everywhere."""
+        try:
+            spec = self.config.model_for(role)
+        except KeyError:
+            return False
+        base = spec["base_url"]
+        base = base[:-3] if base.endswith("/v1") else base
+        key = (base, spec["model"])
+        if key not in self._tools_cache:
+            supported = False
+            try:
+                r = requests.post(base + "/api/show",
+                                  json={"model": spec["model"]}, timeout=10)
+                if r.status_code < 400:
+                    caps = r.json().get("capabilities") or []
+                    supported = "tools" in caps
+            except Exception:
+                supported = False
+            self._tools_cache[key] = supported
+        return self._tools_cache[key]
+
     # ---- Ollama native path ---------------------------------------------------
 
-    def _chat_ollama(self, spec, messages, stream, temperature, on_token, timeout):
+    def _chat_ollama(self, spec, messages, stream, temperature, on_token,
+                     timeout, tools=None):
         base = spec["base_url"]
         base = base[:-3] if base.endswith("/v1") else base
         url = base + "/api/chat"
@@ -83,13 +120,17 @@ class LLM:
                 "num_ctx": int(self._perf("num_ctx", 8192)),
             },
         }
+        if tools:
+            payload["tools"] = tools
 
         if not stream:
             r = requests.post(url, json=payload, timeout=timeout)
             self._raise_for_status(r, spec)
             obj = r.json()
             self.last_metrics = self._ollama_metrics(obj)
-            return (obj.get("message") or {}).get("content", "") or ""
+            msg = obj.get("message") or {}
+            self.last_tool_calls.extend(msg.get("tool_calls") or [])
+            return msg.get("content", "") or ""
 
         chunks = []
         with requests.post(url, json=payload, stream=True, timeout=timeout) as r:
@@ -103,7 +144,10 @@ class LLM:
                     continue
                 if obj.get("error"):
                     raise LLMError(f"{model}: {obj['error']}")
-                tok = (obj.get("message") or {}).get("content", "")
+                msg = obj.get("message") or {}
+                # Tool calls stream as their own chunks alongside any text.
+                self.last_tool_calls.extend(msg.get("tool_calls") or [])
+                tok = msg.get("content", "")
                 if tok:
                     chunks.append(tok)
                     if on_token:

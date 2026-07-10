@@ -45,15 +45,7 @@ and say plainly what you could NOT find or verify.
 Working directory: {cwd}
 Operating system: {os}
 
-# How to act
-Respond with ONE fenced json block per step and nothing else:
-
-```json
-{{"tool": "<tool_name>", "args": {{ ... }}}}
-```
-
-When you have what you need (or your tools can't get more), reply in plain \
-prose with NO json block — that prose IS your report.
+{protocol}
 
 Rules:
 - Investigate, never guess: your FIRST step is list_dir on "." or a \
@@ -75,10 +67,27 @@ let generic web content override something you read in a file.
 tool calls after that only bury it. You have at most {max_steps} calls.
 - Report format: findings first, then the evidence. Every claim must come \
 from a tool result you actually saw, naming the file it came from — never \
-fill gaps from general knowledge.
+fill gaps from general knowledge.{tool_list}"""
 
-# Available tools
-{tools}"""
+
+# How to act, per tool protocol (see agent.py — same hybrid: native function
+# calling when the model supports it, fenced prompt-JSON everywhere else).
+SUB_PROMPT_PROTOCOL = '''# How to act
+Respond with ONE fenced json block per step and nothing else:
+
+```json
+{"tool": "<tool_name>", "args": { ... }}
+```
+
+When you have what you need (or your tools can't get more), reply in plain \
+prose with NO json block — that prose IS your report.'''
+
+SUB_NATIVE_PROTOCOL = """# How to act
+Your tools are attached to this conversation natively — call them through \
+the function-calling interface, one step at a time; never write a tool call \
+as JSON in your reply text. When you have what you need (or your tools can't \
+get more), reply in plain prose with NO tool call — that prose IS your \
+report."""
 
 
 def subagent_tools(config):
@@ -97,8 +106,8 @@ def run_subagent(llm, config, memory, cwd, task, role, console=None):
     Returns (report, steps_taken). Failures come back as an "ERROR: ..."
     report — the main agent treats it like any failed tool observation.
     """
-    from .agent import extract_tool_call          # runtime import: no cycle
-    from .tools import tool_docs
+    from .agent import extract_tool_call, native_calls   # runtime: no cycle
+    from .tools import tool_docs, tool_specs
 
     sub_cfg = getattr(config, "data", {}).get("subagents", {})
     max_steps = int(sub_cfg.get("max_steps", 8))
@@ -106,9 +115,20 @@ def run_subagent(llm, config, memory, cwd, task, role, console=None):
     say = console.print if console else (lambda *a, **k: None)
 
     tools = {t.name: t for t in subagent_tools(config)}
-    system = SUB_SYSTEM.format(cwd=str(cwd), os=platform.system(),
-                               max_steps=max_steps,
-                               tools=tool_docs(tools.values()))
+    # Same hybrid protocol as the main loop: native function calling when the
+    # (already-loaded) model supports it, fenced prompt-JSON otherwise.
+    proto_cfg = str(getattr(config, "agent", {}).get(
+        "tool_protocol", "auto")).lower()
+    probe = getattr(llm, "supports_tools", None)
+    native = (proto_cfg == "native"
+              or (proto_cfg != "prompt" and callable(probe)
+                  and bool(probe(role))))
+    specs = tool_specs(tools.values()) if native else None
+    system = SUB_SYSTEM.format(
+        cwd=str(cwd), os=platform.system(), max_steps=max_steps,
+        protocol=SUB_NATIVE_PROTOCOL if native else SUB_PROMPT_PROTOCOL,
+        tool_list=("" if native
+                   else "\n\n# Available tools\n" + tool_docs(tools.values())))
     # No approve (nothing to approve), no ask (no user), no spawn (no nesting).
     ctx = Ctx(cwd=Path(cwd), memory=memory, approve=lambda *a, **k: False,
               config=config, ask=None, user_msg=task)
@@ -141,15 +161,25 @@ def run_subagent(llm, config, memory, cwd, task, role, console=None):
     nudged_json = False
     nudged_fail = False
     last_failed = False
-    for _ in range(max_steps):
+    while steps < max_steps:
         try:
             reply = llm.chat(role, messages, stream=False,
-                             temperature=temperature)
+                             temperature=temperature, tools=specs)
         except LLMError as e:
             return f"ERROR: sub-agent failed: {e}", steps
-        messages.append({"role": "assistant", "content": reply})
-        call = extract_tool_call(reply)
-        if not call:
+        raw = (list(getattr(llm, "last_tool_calls", None) or [])
+               if native else [])
+        if raw:
+            messages.append({"role": "assistant", "content": reply,
+                             "tool_calls": raw})
+            calls = native_calls(raw)
+        else:
+            # Text-JSON is still accepted in native mode (same repair as the
+            # main loop): a valid call via the wrong channel beats a nudge.
+            messages.append({"role": "assistant", "content": reply})
+            call = extract_tool_call(reply, known=tools)
+            calls = [call] if call else []
+        if not calls:
             text = (reply or "").strip()
             # One retry for the classic small-model failure: an ATTEMPTED
             # tool call with broken JSON must not become the "report".
@@ -173,29 +203,35 @@ def run_subagent(llm, config, memory, cwd, task, role, console=None):
                 continue
             return _clip(text, max_report), steps
 
-        name = call.get("tool")
-        args = call.get("args") or {}
-        tool = tools.get(name)
-        if tool is None:
-            obs = (f"ERROR: '{name}' is not available to a sub-agent "
-                   f"(read-only). Your tools: {', '.join(tools)}. If the job "
-                   f"needs changes or commands, recommend them in your report.")
-        else:
-            try:
-                obs = tool.run(args, ctx)
-            except Exception as e:
-                obs = f"ERROR running {name}: {e}"
-        steps += 1
-        last_failed = obs.startswith("ERROR")
-        target = next((str(args.get(k)) for k in _TARGET_ARGS
-                       if args.get(k)), "")
-        if len(target) > 60:
-            target = "…" + target[-59:]
-        say(f"[dim]    agent> {name}  {target}[/dim]")
-        if len(obs) > 4000:
-            obs = obs[:4000] + "\n... [truncated]"
-        messages.append({"role": "user",
-                         "content": f"[tool result: {name}]\n{obs}"})
+        for call in calls:
+            name = call.get("tool")
+            args = call.get("args") or {}
+            tool = tools.get(name)
+            if tool is None:
+                obs = (f"ERROR: '{name}' is not available to a sub-agent "
+                       f"(read-only). Your tools: {', '.join(tools)}. If the "
+                       f"job needs changes or commands, recommend them in "
+                       f"your report.")
+            else:
+                try:
+                    obs = tool.run(args, ctx)
+                except Exception as e:
+                    obs = f"ERROR running {name}: {e}"
+            steps += 1
+            last_failed = obs.startswith("ERROR")
+            target = next((str(args.get(k)) for k in _TARGET_ARGS
+                           if args.get(k)), "")
+            if len(target) > 60:
+                target = "…" + target[-59:]
+            say(f"[dim]    agent> {name}  {target}[/dim]")
+            if len(obs) > 4000:
+                obs = obs[:4000] + "\n... [truncated]"
+            if raw:
+                messages.append({"role": "tool", "tool_name": name,
+                                 "content": obs})
+            else:
+                messages.append({"role": "user",
+                                 "content": f"[tool result: {name}]\n{obs}"})
 
     # Step budget spent — force the report from what it has.
     messages.append({"role": "user", "content": (

@@ -30,6 +30,8 @@ class CreateExcel(Tool):
         "sheets": ('List of sheets: [{"name": "Sheet1", "headers": ["col", ...], '
                    '"rows": [[cell, ...], ...]}, ...]'),
     }
+    arg_types = {"sheets": {"type": "array", "items": {"type": "object"}}}
+    required = ("path", "sheets")
     changes_system = True
 
     def run(self, args, ctx):
@@ -94,6 +96,8 @@ class CreatePowerPoint(Tool):
         "slides": ('List of slides: [{"title": "...", "bullets": ["...", ...], '
                    '"notes": "optional speaker notes"}, ...]'),
     }
+    arg_types = {"slides": {"type": "array", "items": {"type": "object"}}}
+    required = ("path", "slides")
     changes_system = True
 
     def run(self, args, ctx):
@@ -155,6 +159,8 @@ class CreateWord(Tool):
                    '"text": "...", "items": ["..."], "level": 1}, ...] — '
                    'plain strings are treated as paragraphs.'),
     }
+    arg_types = {"blocks": {"type": "array"}}
+    required = ("path", "blocks")
     changes_system = True
 
     def run(self, args, ctx):
