@@ -1947,6 +1947,35 @@ check("a faked '[actions taken this turn]' block is nudged, not accepted",
       and _mimanswer == "Fixed the typo for real.")
 check("a faked '[tool result:' block is a mimicry stall too",
       _mimagent._stall_reason("[tool result: read_file]\nstuff", []) == "mimicry")
+check("mimicry is caught mid-reply as well (live: after a parroted line)",
+      _mimagent._stall_reason("Building: the game — starting now. "
+                              "[tool result: read_file(x) -> OK]", [])
+      == "mimicry")
+
+class _DoubleMimicLLM:
+    """Mimics TWICE (observed live) — unlike other stalls, mimicry must be
+    nudged every time, because a faked block is never a real answer."""
+    last_metrics = None
+    def __init__(self):
+        self.calls = 0
+        self.nudges = []
+    def chat(self, role, messages, **kw):
+        self.calls += 1
+        if self.calls > 1:
+            self.nudges.append(messages[-1]["content"])
+        reply = ("[actions taken this turn]\n- write_file(a) -> OK"
+                 if self.calls <= 2 else "Done for real this time.")
+        if kw.get("on_token"):
+            kw["on_token"](reply)
+        return reply
+
+_dmllm = _DoubleMimicLLM()
+_dmagent = Agent(llm=_dmllm, config=Config.load(), memory=_Stub(),
+                 router=_Stub(), console=_quiet, improver=_Stub(),
+                 approve=lambda *a, **k: True, ask=None)
+check("mimicry is re-nudged every time until the model actually answers",
+      _dmagent.run("fix the file") == "Done for real this time."
+      and sum(1 for n in _dmllm.nudges if "performs NOTHING" in n) == 2)
 
 # -- the tool-message shapes survive context fitting --------------------------
 _tmsgs = ([{"role": "system", "content": "SYS"}]
@@ -1997,6 +2026,151 @@ with _tf.TemporaryDirectory() as _sntd:
     check("sub-agent native prompt drops the fenced-JSON instructions",
           "```json" not in _snllm.systems[0]
           and "# Available tools" not in _snllm.systems[0])
+
+print("\ncompact output + interrupt polish (Claude-style tool steps)")
+from gt.agent import lead_line
+from gt.ui import streaming_markdown as _sm
+
+check("lead_line picks the first prose line, skipping fences and JSON",
+      lead_line('```json\n{"tool":"x"}\n```\nBuilding: canvas game — now.\n'
+                '```js\ncode\n```') == "Building: canvas game — now.")
+check("lead_line skips bare JSON/bracket lines",
+      lead_line('{"tool": "write_file"}\n[1, 2]\nOn it.') == "On it.")
+check("lead_line is '' when a reply is pure code/JSON",
+      lead_line('```js\nlet x = 1;\n```') == "")
+check("lead_line truncates long prose",
+      lead_line("y" * 300).endswith("…"))
+
+_sconsole = Console(file=io.StringIO(), force_terminal=False, width=100)
+with _sm(_sconsole, collapse=lambda t: "one dim line") as (_ot, _b):
+    _ot("SECRET_CODE_DUMP\n" * 10)
+_sout = _sconsole.file.getvalue()
+check("a collapsed reply prints the summary line, not the dump",
+      "one dim line" in _sout and "SECRET_CODE_DUMP" not in _sout)
+_sconsole2 = Console(file=io.StringIO(), force_terminal=False, width=100)
+with _sm(_sconsole2, collapse=lambda t: None) as (_ot2, _b2):
+    _ot2("A full **answer** for the user.")
+check("collapse=None still prints the full reply",
+      "answer" in _sconsole2.file.getvalue())
+_sconsole3 = Console(file=io.StringIO(), force_terminal=False, width=100)
+with _sm(_sconsole3, collapse=lambda t: "") as (_ot3, _b3):
+    _ot3("intermediate junk")
+check("an empty summary prints nothing at all",
+      "intermediate junk" not in _sconsole3.file.getvalue())
+
+# End-to-end: an intermediate tool-call reply must NOT flood the terminal.
+class _VerboseLLM:
+    """Streams prose + a big code fence + the tool call (the flappy-bird
+    transcript shape), then a clean final answer."""
+    last_metrics = None
+    def __init__(self):
+        self.calls = 0
+    def chat(self, role, messages, **kw):
+        self.calls += 1
+        if self.calls == 1:
+            reply = ("Building: the game — starting now.\n"
+                     "```js\n" + "const CODE_LINE = 1;\n" * 40 + "```\n"
+                     '```json\n{"tool":"list_dir","args":{"path":"."}}\n```')
+        else:
+            reply = "All done — open index.html to play."
+        if kw.get("on_token"):
+            kw["on_token"](reply)
+        return reply
+
+_vout = io.StringIO()
+_vconsole = _Console(file=_vout, force_terminal=False, width=120)
+_vagent = Agent(llm=_VerboseLLM(), config=Config.load(), memory=_Stub(),
+                router=_Stub(), console=_vconsole, improver=_Stub(),
+                approve=lambda *a, **k: True, ask=None)
+_vagent.run("fix the game files")   # 'fix' = work turn, but no intent gate
+_vtext = _vout.getvalue()
+check("tool-step replies collapse to one line (no code dump on screen)",
+      "CODE_LINE" not in _vtext and '"tool"' not in _vtext
+      and "Building: the game — starting now." in _vtext)
+check("the final answer still prints in full",
+      "open index.html to play" in _vtext)
+
+# Loop breaker: an identical call that already failed is refused, not re-run.
+class _RepeatFailLLM:
+    last_metrics = None
+    def __init__(self):
+        self.calls = 0
+        self.observations = []
+    def chat(self, role, messages, **kw):
+        self.calls += 1
+        if self.calls > 1:
+            self.observations.append(messages[-1]["content"])
+        reply = ('```json\n{"tool":"read_file","args":'
+                 '{"path":"does_not_exist.txt"}}\n```'
+                 if self.calls <= 3 else "Blocked: that file does not exist.")
+        if kw.get("on_token"):
+            kw["on_token"](reply)
+        return reply
+
+_rfllm = _RepeatFailLLM()
+_rfagent = Agent(llm=_rfllm, config=Config.load(), memory=_Stub(),
+                 router=_Stub(), console=_quiet, improver=_Stub(),
+                 approve=lambda *a, **k: True, ask=None)
+_rfagent.run("read that file")
+check("first failing call runs and returns the real error",
+      "ERROR" in _rfllm.observations[0])
+check("an identical repeat of a failed call is REFUSED, not re-run",
+      any("REFUSED: you already made exactly this" in o
+          for o in _rfllm.observations[1:]))
+check("REFUSED steps are marked FAILED in the digest",
+      digest_line("read_file", {"path": "x"},
+                  "REFUSED: you already made exactly this call...")
+      .startswith("- FAILED"))
+
+# write_todos repairs a string-encoded LIST value (live: 3x in one turn)
+from gt.tools import WriteTodos
+_wt_ctx = Ctx(cwd=Path("."), memory=None, approve=lambda *a, **k: True,
+              config=cfg)
+_wt_out = WriteTodos().run(
+    {"todos": '[{"task": "a", "status": "doing"}]'}, _wt_ctx)
+check("write_todos repairs a string-encoded list value",
+      _wt_out.startswith("OK") and _wt_ctx.todos
+      == [{"task": "a", "status": "doing"}])
+
+# 3-strike rule: differently-broken args, same tool, same class of failure.
+class _FlailLLM:
+    """Calls write_todos with a DIFFERENT broken string each time (so the
+    identical-call breaker can't match) — the 3-strike rule must stop it."""
+    last_metrics = None
+    def __init__(self):
+        self.calls = 0
+        self.observations = []
+    def chat(self, role, messages, **kw):
+        self.calls += 1
+        if self.calls > 1:
+            self.observations.append(messages[-1]["content"])
+        reply = (f'```json\n{{"tool":"write_todos","args":'
+                 f'{{"todos":"[broken{self.calls}"}}}}\n```'
+                 if self.calls <= 5 else "Giving a proper answer now.")
+        if kw.get("on_token"):
+            kw["on_token"](reply)
+        return reply
+
+_flllm = _FlailLLM()
+_flagent = Agent(llm=_flllm, config=Config.load(), memory=_Stub(),
+                 router=_Stub(), console=_quiet, improver=_Stub(),
+                 approve=lambda *a, **k: True, ask=None)
+_flagent.run("fix the checklist")
+_fl_errors = [o for o in _flllm.observations if "ERROR:" in o]
+_fl_refused = [o for o in _flllm.observations if "failed 3 times" in o]
+check("a tool flailing on its OWN validation errors is cut off after 3",
+      len(_fl_errors) == 3 and _fl_refused)
+
+check("intent gate: a flat 0% confidence fails open instead of asking",
+      IntentGate(_GateReplyLLM(
+          "confidence: 0\nreading: some game\nquestion: extra features?"),
+          _igcfg, _quiet).assess("build flappy bird", "tiny") is None)
+
+from gt.office import _install_hint
+_hint = _install_hint("python-pptx")
+check("office install hint tells the model the exact run_command to use",
+      "run_command" in _hint and "-m pip install python-pptx" in _hint
+      and sys.executable in _hint)
 
 print("\nstartup banner renders (3D wordmark + author + build)")
 from gt import banner as _banner

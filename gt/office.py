@@ -9,10 +9,23 @@ still starts on a machine where they failed to install; the tool just returns
 an actionable install hint instead.
 """
 
+import sys
+
 from .base import Tool
 
-_INSTALL_HINT = ("ERROR: this tool needs '{pkg}'. Run: pip install {pkg} "
-                 "(or re-run setup.bat / setup.sh).")
+# Addressed to the MODEL, with the exact recovery step: a live session showed
+# a 3B respond to the old bare hint by inventing a 'pip' tool and hallucinating
+# successful installs, instead of using run_command with GT's own python.
+_INSTALL_HINT = ('ERROR: the \'{pkg}\' package is not installed in GT\'s '
+                 'environment, so this tool cannot run yet. To fix it, call '
+                 'the run_command tool ONCE with exactly this command: '
+                 '"{py}" -m pip install {pkg} — then, if it succeeded, retry '
+                 'this tool ONCE. If the install fails, stop and report it '
+                 '(the user can re-run setup.bat / setup.sh).')
+
+
+def _install_hint(pkg):
+    return _INSTALL_HINT.format(pkg=pkg, py=sys.executable)
 
 
 def _rows_of(sheet: dict) -> list:
@@ -40,7 +53,7 @@ class CreateExcel(Tool):
             from openpyxl.styles import Font
             from openpyxl.utils import get_column_letter
         except ImportError:
-            return _INSTALL_HINT.format(pkg="openpyxl")
+            return _install_hint("openpyxl")
 
         sheets = args.get("sheets") or []
         if isinstance(sheets, dict):
@@ -104,7 +117,7 @@ class CreatePowerPoint(Tool):
         try:
             from pptx import Presentation
         except ImportError:
-            return _INSTALL_HINT.format(pkg="python-pptx")
+            return _install_hint("python-pptx")
 
         slides = args.get("slides") or []
         if isinstance(slides, dict):
@@ -167,7 +180,7 @@ class CreateWord(Tool):
         try:
             from docx import Document
         except ImportError:
-            return _INSTALL_HINT.format(pkg="python-docx")
+            return _install_hint("python-docx")
 
         blocks = args.get("blocks") or []
         if isinstance(blocks, (str, dict)):

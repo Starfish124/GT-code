@@ -5,4 +5,4 @@ agentic tool loop, remembers things with a vector store, and improves itself by
 extracting lessons from past work.
 """
 
-__version__ = "0.7.0"
+__version__ = "0.7.1"

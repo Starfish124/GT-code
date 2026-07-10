@@ -34,6 +34,9 @@ TURBO_MODEL = "llama3.2:1b"
 
 HELP = """\
 [bold]Commands[/bold]
+  ctrl-c             interrupt the running turn (GT keeps the work done so
+                     far — say 'continue' to resume); at an empty prompt,
+                     press it twice to quit
   /help              show this help
   /setup             re-run first-launch setup (evaluate machine, download models)
   /doctor            show this machine's hardware + which models are live
@@ -145,8 +148,10 @@ class GTShell:
         self.console.print(f"\n[dim]Try:[/dim] [{PURPLE}]what can you do?[/{PURPLE}]"
                            f"   [dim]·[/dim]   [{PURPLE}]build me a todo app[/{PURPLE}]"
                            f"   [dim]·[/dim]   [{PURPLE}]/benchmark[/{PURPLE}]")
-        self.console.print("[dim]/help for commands · /quit to exit · just "
-                           "type to talk or build[/dim]\n")
+        self.console.print("[dim]/help for commands · /quit to exit · ctrl-c "
+                           "interrupts a running turn · just type to talk or "
+                           "build[/dim]\n")
+        ctrlc_armed = False   # Ctrl-C at the prompt: press twice to quit
         while True:
             try:
                 text = self.session.prompt(self._prompt_str()).strip()
@@ -154,9 +159,17 @@ class GTShell:
                 self._finish()
                 self.console.print("bye")
                 return
-            except KeyboardInterrupt:        # Ctrl-C at the prompt: just leave
-                self.console.print("\nbye")
-                return
+            except KeyboardInterrupt:
+                # Never kill the session on a single Ctrl-C — the user may
+                # have just interrupted a turn and pressed it once more.
+                if ctrlc_armed:
+                    self.console.print("\nbye")
+                    return
+                ctrlc_armed = True
+                self.console.print("[dim](ctrl-c again to quit — or just "
+                                   "keep typing)[/dim]")
+                continue
+            ctrlc_armed = False
             if not text:
                 continue
             if text.startswith("#"):
@@ -175,7 +188,10 @@ class GTShell:
             except LLMError as e:
                 self.console.print(f"[red]{e}[/red]")
             except KeyboardInterrupt:
-                self.console.print("\n[yellow](interrupted)[/yellow]")
+                # agent.run normally absorbs Ctrl-C itself (keeping the
+                # turn's work); this catches one landing outside that guard.
+                self.console.print("\n[yellow](interrupted — the work done "
+                                   "so far is kept)[/yellow]")
             self._maybe_periodic_profile()
 
     # ---- slash commands -----------------------------------------------------

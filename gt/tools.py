@@ -6,6 +6,7 @@ go through ctx.approve() so the user stays in control unless auto-approve is on.
 """
 
 import atexit
+import json
 import os
 import re
 import signal
@@ -559,6 +560,13 @@ class WriteTodos(Tool):
 
     def run(self, args, ctx):
         raw = args.get("todos")
+        # Small models JSON-encode the list itself as a string (observed
+        # live, repeatedly) — repair the well-formed case instead of erroring.
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except ValueError:
+                pass
         if not isinstance(raw, list):
             return ("ERROR: 'todos' must be a JSON list of "
                     '{"task": ..., "status": ...} objects.')

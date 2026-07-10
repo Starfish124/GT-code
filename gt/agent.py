@@ -136,6 +136,25 @@ def native_calls(raw):
     return calls
 
 
+def lead_line(text):
+    """The first short PROSE line of a reply — what's worth showing when a
+    tool-step reply is collapsed instead of dumped ('Building: single-file
+    canvas game — starting now.'). Fenced code, JSON and bracketed
+    bookkeeping lines are skipped; '' when there is no prose at all."""
+    in_fence = False
+    for line in (text or "").splitlines():
+        s = line.strip()
+        if s.startswith("```"):
+            in_fence = not in_fence
+            continue
+        if in_fence or not s:
+            continue
+        if s[0] in "{[<" or '"tool"' in s or '"name"' in s:
+            continue
+        return s if len(s) <= 120 else s[:120] + "…"
+    return ""
+
+
 # Any fenced block (```lang\n…```) — used to lift raw write_file content.
 _ANYFENCE = re.compile(r"```[^\n`]*\n(.*?)```", re.S)
 
@@ -202,7 +221,7 @@ def digest_line(name, args, result):
             break
     # Mark failures loudly — follow-up turns must not gloss over them and
     # claim the work succeeded.
-    failed = (first.startswith(("ERROR", "DENIED"))
+    failed = (first.startswith(("ERROR", "DENIED", "REFUSED"))
               or bool(re.match(r"exit code: (?!0\b)", first)))
     return f"- {'FAILED ' if failed else ''}{name}({arg}) -> {first}"
 
@@ -485,6 +504,22 @@ class Agent:
         interrupted = False
         nudged = set()             # stall kinds already nudged this turn
         todo_reminded = bool(self.todos)  # already has a plan → no reminder
+        failed_calls = {}          # (tool, args) of calls that FAILED this turn
+        tool_errors = {}           # tool -> count of ERROR/DENIED results
+
+        def _collapse(text):
+            """Decide what a finished reply prints as (see ui.py): a real
+            answer prints in full; a tool-step reply — including a broken
+            ATTEMPT at one — collapses to its one prose lead line, so the
+            user sees '> write_file index.html', not pages of code/JSON."""
+            has_call = bool(native
+                            and getattr(self.llm, "last_tool_calls", None))
+            if not has_call:
+                has_call = (extract_tool_call(text, known=self.tools)
+                            is not None)
+            if not has_call and not ('"tool"' in text and "{" in text):
+                return None
+            return lead_line(text)
         try:
             for step in range(1, self.max_steps + 1):
                 if self._fit_context(messages) and not compact_warned:
@@ -497,6 +532,7 @@ class Agent:
                         self.console,
                         waiting_label=f"{role} ({model_id}) · reading "
                                       f"~{ptok}-token prompt",
+                        collapse=_collapse,
                     ) as (on_token, _buf):
                         reply = self.llm.chat(role, messages, stream=True,
                                               temperature=temperature,
@@ -527,17 +563,19 @@ class Agent:
                     calls = [attach_content_block(call, reply)] if call else []
 
                 if not calls:
-                    # Small models stall in three recognizable ways instead
-                    # of finishing: give-up prose after a FAILED step,
-                    # announcing work without doing it ('I'll now create…'),
-                    # or repeating their previous answer verbatim when the
-                    # user says 'yes'/'go ahead'. All three would end the
-                    # turn; nudge (max twice per turn) to act instead.
-                    # Each stall kind is nudged at most once per turn: if the
-                    # model STILL answers prose after the nudge, that's its
-                    # answer (e.g. declaring the task impossible).
+                    # Small models stall in recognizable ways instead of
+                    # finishing: give-up prose after a FAILED step, announcing
+                    # work without doing it ('I'll now create…'), repeating
+                    # their previous answer verbatim, or faking a bookkeeping
+                    # block. Each kind is nudged at most once per turn — if
+                    # the model STILL answers prose after the nudge, that's
+                    # its answer (e.g. declaring the task impossible). EXCEPT
+                    # mimicry: a faked '[actions taken]' block is never a
+                    # legitimate answer, so it is nudged every time
+                    # (max_steps still bounds the turn).
                     stall = self._stall_reason(reply.strip(), trace)
-                    if stall and stall not in nudged and step < self.max_steps:
+                    if (stall and step < self.max_steps
+                            and (stall == "mimicry" or stall not in nudged)):
                         nudged.add(stall)
                         self.console.print(f"[dim]· GT stalled ({stall}) — "
                                            f"nudging it to act[/dim]")
@@ -550,7 +588,48 @@ class Agent:
                     break
 
                 for call in calls:
-                    observation = self._run_tool(call, ctx)
+                    # Loop breaker (observed live: the same failing
+                    # create_powerpoint call retried 4x while the model
+                    # narrated fake successes): an IDENTICAL call that
+                    # already failed this turn is refused, not re-run.
+                    key = (call["tool"],
+                           json.dumps(call.get("args") or {},
+                                      sort_keys=True, default=str))
+                    if key in failed_calls:
+                        observation = (
+                            f"REFUSED: you already made exactly this "
+                            f"{call['tool']} call and it failed: "
+                            f"{failed_calls[key]}\nRepeating it cannot "
+                            f"succeed. Fix the cause first, take a genuinely "
+                            f"different approach, or report the blocker to "
+                            f"the user as your final answer.")
+                        self._show_step(call["tool"], call.get("args") or {},
+                                        observation)
+                    elif tool_errors.get(call["tool"], 0) >= 3:
+                        # Three strikes on GT's OWN validation/permission
+                        # errors (never on real command runs — a failing
+                        # build is legitimate debugging): a model that
+                        # couldn't shape the arguments three times is
+                        # flailing, not converging (observed live: write_
+                        # todos x3 with differently-broken strings).
+                        observation = (
+                            f"REFUSED: {call['tool']} has now failed 3 times "
+                            f"this turn — stop calling it. Finish the task "
+                            f"another way, or report the blocker to the user "
+                            f"as your final answer.")
+                        self._show_step(call["tool"], call.get("args") or {},
+                                        observation)
+                    else:
+                        observation = self._run_tool(call, ctx)
+                        first = next((l.strip() for l in
+                                      observation.splitlines() if l.strip()),
+                                     "")
+                        if first.startswith(("ERROR", "DENIED")):
+                            failed_calls[key] = first[:150]
+                            tool_errors[call["tool"]] = (
+                                tool_errors.get(call["tool"], 0) + 1)
+                        elif re.match(r"exit code: (?!0\b)", first):
+                            failed_calls[key] = first[:150]
                     trace.append(digest_line(call["tool"],
                                              call.get("args") or {},
                                              observation))
@@ -897,10 +976,11 @@ class Agent:
         """
         # Digest mimicry (observed live on the 3B): with a digest in history,
         # the model EMITS a fake '[actions taken this turn]' / '[tool result:'
-        # block as its answer instead of acting. Checked first — a mimicked
-        # digest is a corrupted answer in every mode, plan turns included.
-        if ("[actions taken this turn]" in text
-                or text.lstrip().startswith("[tool result")):
+        # block as its answer instead of acting — anywhere in the reply (live
+        # it appeared mid-line, after a parroted prompt example). Checked
+        # first — a mimicked digest is a corrupted answer in every mode, plan
+        # turns included. GT itself never puts these markers in an answer.
+        if "[actions taken this turn]" in text or "[tool result" in text:
             return "mimicry"
         # A reply that contains '"tool"' but parsed to no call is an
         # ATTEMPTED tool call with broken JSON (models truncate long

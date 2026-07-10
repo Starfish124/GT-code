@@ -103,6 +103,12 @@ class IntentGate:
         if not m:
             return None
         confidence = max(0, min(100, int(m.group(1))))
+        # A flat 0 is miscalibration, not assessment (observed live: a 3B
+        # scored a perfectly clear build request 'confidence: 0' and asked a
+        # filler question). No comprehensible request is ZERO-percent
+        # readable — treat it like unparseable output and fail open.
+        if confidence == 0:
+            return None
         reading = (_READ.search(out).group(1).strip()
                    if _READ.search(out) else "")
         question = (_QUES.search(out).group(1).strip()
