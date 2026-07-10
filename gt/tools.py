@@ -108,6 +108,11 @@ class EditFile(Tool):
             return f"ERROR: file not found: {p}"
         find = args.get("find", "")
         replace = args.get("replace", "")
+        # ''.count('') is len+1, so an empty find used to report "matched
+        # 4321 times" on a 4320-char file (observed live) — catch it plainly.
+        if not find:
+            return ("ERROR: 'find' is empty. read_file the file first, then "
+                    "pass the exact snippet to replace.")
         try:
             text = p.read_text(encoding="utf-8")
         except Exception as e:

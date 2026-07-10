@@ -2174,6 +2174,84 @@ check("office install hint tells the model the exact run_command to use",
       "run_command" in _hint and "-m pip install python-pptx" in _hint
       and sys.executable in _hint)
 
+print("\nmid-task continuity (follow-ups stay on the working model)")
+_ctagent = Agent(llm=_StubLLM(), config=Config.load(), memory=_Stub(),
+                 router=Router(llm=None, config=cfg), console=_quiet,
+                 improver=_Stub(), approve=lambda *a, **k: True, ask=None)
+_ctagent.todos[:] = [{"task": "build the game", "status": "doing"}]
+_ctagent._task_role = "fast"
+check("'start the game' mid-task is a WORK turn on the task's model",
+      _ctagent._resolve_turn("start the game") == ("fast", False, False, "work"))
+check("'its blank just a white page' mid-task stays work on the 8B",
+      _ctagent._resolve_turn("its blank just a white page")
+      == ("fast", False, False, "work"))
+check("an architecture follow-up can still ESCALATE past the task role",
+      _ctagent._resolve_turn("redesign the architecture from scratch")[0]
+      == "brain")
+check("genuine small talk mid-task still slips through as chat",
+      _ctagent._resolve_turn("thanks!")[2] is True)
+_ctagent.todos[:] = [{"task": "build the game", "status": "done"}]
+check("a finished checklist releases the stickiness",
+      _ctagent._resolve_turn("what a nice day")[1] is True)
+check("_task_role is set by a work turn that ran tools",
+      (_agent2 := Agent(llm=_StubLLM(), config=Config.load(), memory=_Stub(),
+                        router=_Stub(), console=_quiet, improver=_Stub(),
+                        approve=lambda *a, **k: True, ask=None))
+      .run("what files are here?") is not None
+      and _agent2._task_role == "fast")
+check("reset clears the sticky task role",
+      (_agent2.reset() or _agent2._task_role) is None)
+
+print("\nnatural-language model requests ('use the 8b on this')")
+check("'use the 8b model on this its still a blank page' -> fast",
+      _ctagent._resolve_turn("use the 8b model on this its still a blank page")
+      == ("fast", False, False, "work"))
+check("'use the 14b' -> brain and 'use the 3b' -> tiny",
+      _ctagent._asked_role("use the 14b for this") == "brain"
+      and _ctagent._asked_role("please use the 3b") == "tiny")
+check("a size no configured model has is ignored",
+      _ctagent._asked_role("use the 70b") is None)
+check("ordinary sentences don't false-positive",
+      _ctagent._asked_role("use the game controls to play") is None)
+
+print("\ncode-dump stall (a whole file pasted into chat is not an answer)")
+_bigfence = "Here you go:\n```html\n" + "<div>x</div>\n" * 20 + "```"
+_cdagent = _ctagent          # has todos (done) — use trace to mark mid-task
+check("a big fence mid-task is a codedump stall",
+      _cdagent._stall_reason(_bigfence, ["- write_file(x) -> OK"])
+      == "codedump")
+_cdagent2 = Agent(llm=_StubLLM(), config=Config.load(), memory=_Stub(),
+                  router=_Stub(), console=_quiet, improver=_Stub(),
+                  approve=lambda *a, **k: True, ask=None)
+check("a big fence with NO task context is a legitimate answer",
+      _cdagent2._stall_reason(_bigfence, []) is None)
+check("a small snippet mid-task is fine",
+      _cdagent2._stall_reason("Use this:\n```js\nlet x = 1;\n```",
+                              ["- read_file(a) -> ok"]) is None)
+from gt.agent import _NUDGE as _NUDGES
+check("the codedump nudge tells it to write the file",
+      "write_file" in _NUDGES["codedump"])
+
+print("\nedit_file empty-find guard (the 'matched 4321 times' bug)")
+with _tf.TemporaryDirectory() as _eftd:
+    _efp = Path(_eftd) / "page.html"
+    _efp.write_text("x" * 100, encoding="utf-8")
+    from gt.tools import EditFile
+    _ef_out = EditFile().run({"path": str(_efp), "find": "", "replace": "y"},
+                             Ctx(cwd=Path(_eftd), memory=None,
+                                 approve=lambda *a, **k: True, config=cfg))
+    check("an empty 'find' gets a plain error, not 'matched 101 times'",
+          "'find' is empty" in _ef_out and "times" not in _ef_out)
+
+print("\n'start the game' counts as work, not chat")
+from gt.router import _CODE_HINT as _CH
+check("start/open/launch the game|app|site are work signals",
+      all(_CH.search(s) for s in
+          ("start the game", "open the app", "launch my website",
+           "restart the server")))
+check("chatty sentences with those words stay chat",
+      not _CH.search("what a nice day to start the morning"))
+
 print("\nesc-to-interrupt plumbing")
 from gt.interrupt import esc_interrupts
 _esc_ok = True

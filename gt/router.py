@@ -36,6 +36,11 @@ _CODE_HINT = re.compile(
     r"\b(code|bug|error|stack ?trace|function|class|refactor|implement|"
     r"compile|test|install|run|files?|folders?|director(y|ies)|repo|git|"
     r"debug|api|regex|script|"
+    # "start the game" / "open the app" — operating a built thing is work,
+    # not chat (observed live: it routed to chat temp + the conversation
+    # playbook right after the build).
+    r"(start|open|launch|serve|restart|stop)\s+(the\s+|my\s+|this\s+)?"
+    r"(game|app|application|server|site|website|page|demo)|"
     r"frontend|backend|website|web ?app|webpage|server|database|deploy|"
     r"host(ing)?|html|css|react|vue|svelte|node|python|"
     r"excel|spreadsheet|powerpoint|slides?|\bdeck\b|word doc(ument)?|"

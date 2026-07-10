@@ -263,6 +263,11 @@ _NUDGE = {
                 "no command ran. Do the work for real now: make the actual "
                 "tool call, or answer in plain prose with no bracketed "
                 "blocks."),
+    "codedump": ("[system] You pasted a whole file into the CHAT as your "
+                 "answer. Nothing on disk changed — the user needs the FILE "
+                 "updated, not code to copy by hand. Send that content as a "
+                 "write_file call now (or edit_file for a small change). "
+                 "Code in chat does nothing."),
     # badjson, but the turn runs on NATIVE function calling — 're-send a json
     # block' would be the wrong advice, so point at the right channel.
     "badjson_native": ("[system] You wrote a tool call as TEXT, but it did "
@@ -339,6 +344,9 @@ class Agent:
         # user's go" — the next affirmative turn builds.
         self.intent_gate = IntentGate(llm, config, console)
         self._pending_plan = False
+        # The model role the current task is running on — while the checklist
+        # has open items, follow-up turns stick to it (see _resolve_turn).
+        self._task_role = None
 
         # Tools available this session (web tools dropped if web.enabled=false).
         self.tools = {t.name: t for t in active_tools(config)}
@@ -677,6 +685,12 @@ class Agent:
             self.console.print("\n[yellow](interrupted — keeping the work "
                                "done so far in this turn)[/yellow]")
 
+        # A work turn that actually ran tools sets the sticky task role:
+        # while the checklist stays open, follow-ups run on this same
+        # (already warm) model instead of being re-classified as chat.
+        if trace and not conversational:
+            self._task_role = role
+
         # Persist the turn. The user message goes in AS SENT (cache prefix
         # stays valid); intermediate tool chatter is replaced by a compact
         # digest so the next turn knows what was actually done.
@@ -766,6 +780,7 @@ class Agent:
         self.todos.clear()
         self.session_summary = ""
         self._pending_plan = False
+        self._task_role = None
 
     def compact_now(self):
         """Fold the WHOLE conversation into the session summary (/compact).
@@ -939,10 +954,51 @@ class Agent:
             return (self.force_role or self._forced_role("brain")), False, False, "plan"
         if pending and AFFIRM.match(user_msg or ""):
             return (self.force_role or self._forced_role("fast")), False, False, "work"
+        # "use the 8b (model) on this" — honour a natural-language model
+        # request for this turn (observed live: the user asked exactly that
+        # and the router ignored it). The executed role then becomes the
+        # sticky task role below, so it persists for the task.
+        asked = self._asked_role(user_msg)
+        if asked:
+            return asked, False, False, "work"
         role = self.force_role or self.router.route(user_msg)
         conversational = self._is_conversational(user_msg)
         chat_only = self._chat_only(user_msg)
+        # Mid-task continuity (observed live: the 8B built flappy bird, then
+        # 'start the game' and 'its blank just a white page' dropped to the
+        # 3B at chat temperature): while the checklist has open items, a
+        # follow-up IS work on that task — it stays a work turn and runs on
+        # the model that is doing the task (already warm). Genuine small
+        # talk (chat_only) still slips through as chat.
+        if (not chat_only and not self.force_role
+                and any(t.get("status") != "done" for t in self.todos)):
+            return self._higher_role(role, self._task_role), False, False, "work"
         return role, conversational, chat_only, ("chat" if chat_only else "work")
+
+    # "use the 8b" / "use the 14b model" — a size, mapped to whichever role
+    # currently serves a model of that size.
+    _MODEL_ASK = re.compile(r"(?i)\buse\s+(?:the\s+)?(\d{1,2})\s*b\b")
+
+    def _asked_role(self, user_msg):
+        m = self._MODEL_ASK.search(user_msg or "")
+        if not m:
+            return None
+        size = m.group(1) + "b"
+        for role in ("tiny", "fast", "brain"):
+            spec = self.config.models.get(role) or {}
+            if size in str(spec.get("model", "")).lower():
+                return role
+        return None
+
+    _ROLE_RANK = {"tiny": 0, "fast": 1, "brain": 2}
+
+    def _higher_role(self, routed, task_role):
+        """The stronger of the freshly-routed role and the sticky task role —
+        a follow-up never DOWNGRADES mid-task, but 'now redesign the whole
+        architecture' can still escalate past it."""
+        if not task_role:
+            return routed
+        return max(routed, task_role, key=lambda r: self._ROLE_RANK.get(r, 0))
 
     def _use_native(self, role):
         """Native function calling for this role's model? (config + probe)
@@ -971,8 +1027,8 @@ class Agent:
     def _stall_reason(self, text, trace):
         """Classify a no-tool-call reply that shouldn't end the turn.
 
-        Returns 'badjson' | 'failed' | 'intent' | 'echo' | 'mimicry' | None.
-        None means the reply is a legitimate final answer.
+        Returns 'badjson' | 'failed' | 'intent' | 'echo' | 'mimicry' |
+        'codedump' | None. None means the reply is a legitimate final answer.
         """
         # Digest mimicry (observed live on the 3B): with a digest in history,
         # the model EMITS a fake '[actions taken this turn]' / '[tool result:'
@@ -998,6 +1054,14 @@ class Agent:
         # write_file that plan mode then had to deny).
         if getattr(self, "_plan_turn", False):
             return None
+        # A whole file pasted into the CHAT as the "answer" (observed live:
+        # a 3B answered a blank-page bug report with a complete replacement
+        # HTML file in prose — nothing on disk changed). Only mid-task: a
+        # big fence in a from-scratch explanation can be a legitimate answer.
+        if (self.todos or trace) and any(
+                len(b.strip().splitlines()) >= 15
+                for b in _ANYFENCE.findall(text)):
+            return "codedump"
         if trace and trace[-1].startswith("- FAILED"):
             return "failed"
         # Verbatim repeat of the previous turn's answer — the 'yes' → same
