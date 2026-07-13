@@ -12,6 +12,30 @@ questions", "set clear boundaries") that gets recalled into future prompts
 and actively steers small models toward bad behavior.
 """
 
+import re
+
+# A "lesson" that is really code, a schema/format instruction, or a task list
+# is never useful as recalled guidance — and is actively DANGEROUS. Observed
+# live on a small model: a write_todos SCHEMA got saved as a lesson
+# ("Use a JSON list of objects with 'task' and 'status' properties… Example:
+# [{'task': 'Create a flappy bird'…}]"), then recall surfaced it at 0.45 on
+# the unrelated question "what models are available?" and the model latched
+# onto the flappy-bird example and built flappy bird instead of answering.
+# We reject this shape on SAVE and skip it on RECALL, so existing poison in a
+# user's memory.db stops derailing turns even before a manual /forget lesson.
+_CODE_SHAPE = re.compile(r"```|\{[^}\n]*\}|\[[^\]\n]*\]", re.S)
+_SCHEMA_TALK = re.compile(
+    r"(?i)list of objects|as shown in|propert(?:y|ies)\b|\bschema\b"
+    r"|'?(?:task|status)'?\s*:")
+
+
+def is_noise_lesson(text: str) -> bool:
+    """True for 'lessons' that are code / JSON / a schema directive / a task
+    list — reject on save, skip on recall."""
+    if not text or len(text.strip()) < 8:
+        return True
+    return bool(_CODE_SHAPE.search(text) or _SCHEMA_TALK.search(text))
+
 
 class Improver:
     def __init__(self, llm, memory, reviewer_role="reviewer"):
@@ -41,7 +65,8 @@ class Improver:
                     "the concrete situation and the fix (e.g. 'Use Vite "
                     "instead of create-react-app — CRA times out'). NEVER "
                     "output generic advice about asking questions, clarity, "
-                    "boundaries, or communication. "
+                    "boundaries, or communication. NEVER output JSON, code, "
+                    "brackets, a schema, or a task list — those are not lessons. "
                     "Write a single imperative sentence, or exactly: NONE"
                 ),
             },
@@ -64,6 +89,9 @@ class Improver:
             return None
         low = lesson.lower()
         if any(b in low for b in self._BANNED):
+            return None
+        # Reject code / schema / task-list "lessons" (the flappy-bird poison).
+        if is_noise_lesson(lesson):
             return None
 
         # Skip near-duplicates of an existing lesson.

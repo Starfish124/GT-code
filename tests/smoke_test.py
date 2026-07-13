@@ -703,6 +703,24 @@ check("concrete lesson is stored", lesson and mem.added == [lesson])
 check("reviewer sees the tool trace",
       "create-react-app" in imp.llm.messages[1]["content"])
 
+print("\nlesson poison filter (the flappy-bird schema-as-lesson incident)")
+from gt.improve import is_noise_lesson
+_poison = ("Use a JSON list of objects with 'task' and 'status' properties, "
+           "as shown in the final answer. Example: "
+           '[{"task": "Create a flappy bird", "status": ""}]')
+check("the exact poison lesson is flagged as noise", is_noise_lesson(_poison))
+check("a schema directive is noise", is_noise_lesson("Return a schema with properties"))
+check("a JSON array lesson is noise", is_noise_lesson("Store todos as [ {..} ]"))
+check("a concrete lesson is NOT noise",
+      not is_noise_lesson("Use Vite instead of create-react-app — CRA times out"))
+check("a JSON-mentioning prose lesson is NOT noise",
+      not is_noise_lesson("Return valid JSON from the API, not a bare string"))
+_mem2 = _MemStub()
+_ip = Improver(_RecLLM(_poison), _mem2)
+check("poison is rejected on SAVE, never enters memory",
+      _ip.learn("what models are available?", "here", trace=("- recall x",)) is None
+      and not _mem2.added)
+
 print("\nskills — expert playbooks matched per request")
 from gt.skills import load_skills, select, skills_block
 # bundled-only, so these stay deterministic whether or not a big library has
@@ -815,6 +833,18 @@ check("'can you use the internet?' is conversation",
       _tagent._is_conversational("can you use the internet?"))
 check("a real build phrased as a question is still work",
       not _tagent._is_conversational("can you build me a todo app?"))
+# the transcript's two misrouted capability questions (they spawned a research
+# sub-agent + hit poisoned recall instead of answering directly)
+check("'can you deploy agents?' is a capability question (conversation)",
+      _tagent._is_conversational("can you deploy agents?"))
+check("'what models are currently available?' is a capability question",
+      _tagent._is_conversational("what models are currently available?"))
+check("'what tools do you have?' is a capability question",
+      _tagent._is_conversational("what tools do you have?"))
+check("but a genuine deploy TASK stays work",
+      not _tagent._is_conversational("deploy the agents to production for me"))
+check("the model line-up is injected so 'what models' can be answered",
+      "tiny=" in _tagent.capabilities)
 check("plain coding stays work despite the word test",
       not _tagent._is_conversational("fix the failing unit test in main.py"))
 # file / folder / office requests are WORK, not chit-chat — so they get the

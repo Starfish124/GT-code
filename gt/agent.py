@@ -18,6 +18,7 @@ from pathlib import Path
 from rich.text import Text
 
 from .hooks import Hooks
+from .improve import is_noise_lesson
 from .intent import IntentGate, AFFIRM
 from .prompts import build_system, turn_context
 from .skills import load_skills, select, skills_block, SkillIndex
@@ -165,9 +166,11 @@ _CAPABILITY_Q = re.compile(
     r"(?i)\b(what can (you|u) do"
     r"|can (you|u) (use|access|reach|browse|search|read|see|open|get on|"
     r"connect to|go on)"
+    r"|can (you|u) (deploy|spawn|launch|run|create|make|use) (sub[- ]?)?agents?"
     r"|do (you|u) (have|support|work|know|use)"
     r"|are (you|u) able to"
     r"|do (you|u) have access"
+    r"|what (?:llm |ml )?(?:models|tools|capabilities|commands)"
     r"|is it possible for (you|u))\b")
 
 # Identity / small-talk questions that never need a tool — get the lean prompt
@@ -372,8 +375,20 @@ class Agent:
             config.agent.get("tool_protocol", "auto")).lower()
         self.tool_specs = [t.spec() for t in self.tools.values()]
         # A truthful "what you can do" clause built from the active tools —
-        # so GT answers capability questions instead of asking them.
+        # so GT answers capability questions instead of asking them. Append the
+        # actual model line-up so "what models are available?" gets a real
+        # answer from context instead of spawning a research sub-agent.
         self.capabilities = capability_summary(self.tools.values())
+        try:
+            lineup = ", ".join(
+                f"{r}={self.config.models[r]['model']}"
+                for r in ("brain", "fast", "tiny") if r in self.config.models)
+            if lineup:
+                self.capabilities += (
+                    f". You run on these local models (see /models for what's "
+                    f"actually served): {lineup}")
+        except Exception:
+            pass
 
         # Expert playbooks, matched per-request and injected into context.
         skills_cfg = config.data.get("skills", {})
@@ -1377,6 +1392,12 @@ class Agent:
             if text in self._seen_memory:
                 continue
             if kind == "lesson":
+                # Skip code/schema/task-list poison even if it's already in the
+                # user's memory.db (auto_learn is off now, but old lessons live
+                # on) — one such lesson hijacked a small model into building
+                # flappy bird on an unrelated question.
+                if is_noise_lesson(text):
+                    continue
                 lessons += 1
                 if lessons > 2:
                     continue
