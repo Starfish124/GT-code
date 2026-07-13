@@ -89,7 +89,7 @@ if curl -fsm 4 http://localhost:11434/v1/models 2>/dev/null | grep -q '"id"'; th
   ok "10. Ollama has models available"
 else
   warn "10. Ollama serves no models yet" \
-       "type gt and let the wizard download them, or: ollama pull llama3.2:3b"
+       "type gt and let the wizard download them, or: ollama pull qwen2.5:1.5b"
 fi
 
 echo

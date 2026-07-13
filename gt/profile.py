@@ -1,6 +1,6 @@
 """User preference profile — GT learns your habits over time.
 
-A dedicated analyst model (hermes3:3b) periodically reads the session's requests
+A small analyst model (qwen2.5:1.5b, Apache-2.0) periodically reads the session's requests
 and distills a short, durable profile of the user's preferences: favoured stack,
 language, tone, naming conventions, recurring tasks, dislikes. GT injects a
 couple of lines of that profile as context so its defaults match the user
@@ -12,7 +12,7 @@ Design constraints that keep it from undoing the speed work:
     model from the resident 3B, so running it costs a one-time load; doing that
     per turn would reintroduce the model-swap churn GT is built to avoid.
   - It's glass-box: the profile is plain readable JSON on disk, shown and wiped
-    with /profile, and it no-ops cleanly if hermes3:3b isn't pulled.
+    with /profile, and it no-ops cleanly if the analyst model isn't pulled.
 
 This is retrieval/prompt learning (like the reviewer), NOT weight training —
 tested with the offline smoke suite + the live harness, not the LoRA pipeline.
@@ -75,13 +75,13 @@ class Profiler:
         try:
             return self.config.model_for(self.role)["model"]
         except Exception:
-            return "hermes3:3b"
+            return "qwen2.5:1.5b"
 
     def available(self) -> bool:
         """Is the analyst model actually pulled? (No point running otherwise.)
 
-        Matches the FULL id (hermes3:3b), so hermes3:8b does NOT count — we want
-        the specific small analyst, not whatever hermes happens to be served.
+        Matches the FULL id (qwen2.5:1.5b), so qwen2.5:7b does NOT count — we want
+        the specific small analyst, not whatever qwen happens to be served.
         """
         want = self.model_id().lower()
         try:

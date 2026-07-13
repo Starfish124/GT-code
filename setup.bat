@@ -106,9 +106,9 @@ REM GT's first launch evaluates this PC's hardware and offers the bigger
 REM models (up to 14B) only if the machine can actually run them.
 echo.
 echo Downloading the baseline models (~2.3 GB on a fresh machine):
-echo   llama3.2:3b (minimum) + nomic-embed-text (memory)
+echo   qwen2.5:1.5b (minimum) + nomic-embed-text (memory)
 echo.
-for %%M in (llama3.2:3b nomic-embed-text) do (
+for %%M in (qwen2.5:1.5b nomic-embed-text) do (
   ollama pull %%M
   if errorlevel 1 echo [WARN] could not pull %%M - run "ollama pull %%M" later.
 )

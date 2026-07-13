@@ -773,7 +773,7 @@ class Agent:
         # occupy the single Ollama runner and slow the user's next turn.
         worth_learning = (any(t.startswith("- FAILED") for t in trace)
                           or len(trace) >= 3)
-        if (final_answer and self.config.memory.get("auto_learn", True)
+        if (final_answer and self.config.memory.get("auto_learn", False)
                 and not conversational and worth_learning):
             threading.Thread(target=self._maybe_learn,
                              args=(user_msg, final_answer, tuple(trace)),
@@ -1025,9 +1025,9 @@ class Agent:
             return self._higher_role(role, self._task_role), False, False, "work"
         return role, conversational, chat_only, ("chat" if chat_only else "work")
 
-    # "use the 8b" / "use the 14b model" — a size, mapped to whichever role
-    # currently serves a model of that size.
-    _MODEL_ASK = re.compile(r"(?i)\buse\s+(?:the\s+)?(\d{1,2})\s*b\b")
+    # "use the 8b" / "use the 14b model" / "use the 1.5b" — a size (whole or
+    # decimal), mapped to whichever role currently serves a model of that size.
+    _MODEL_ASK = re.compile(r"(?i)\buse\s+(?:the\s+)?(\d{1,2}(?:\.\d)?)\s*b\b")
 
     def _asked_role(self, user_msg):
         m = self._MODEL_ASK.search(user_msg or "")

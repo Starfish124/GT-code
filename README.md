@@ -1,8 +1,17 @@
 GT-Code your own local coding agent! (please scroll lower to see trouble shooting)
 
 A small, self-hosted CLI coding assistant, like Claude Code, but running
-**entirely on your machine** with your local models. No cloud, no API keys,
-no data leaving your PC. with a 3b, 8b and 14b parameter models (input needed for other models)
+**on your machine** with your local models — no cloud LLM, no API keys. It uses
+3B, 8B and 14B parameter models (input needed for other models).
+
+**On the network:** the model itself runs locally (Ollama on localhost) and GT
+sends **no telemetry, analytics, or update checks** — ever. The one way data can
+leave the machine is the optional `web_search` / `web_fetch` tools, which are
+**OFF by default** (`web.enabled: false`); with them off GT is fully
+air-gapped. Turn them on per task if you need internet access. See
+`config.yaml` for every privacy/security default (web, profiling, hooks,
+lesson-learning are all opt-in; file/command access is confined to the folder
+you launch GT in).
 
 On **first launch it evaluates your hardware** (RAM, CPU, GPU/VRAM), tells you
 what this machine can handle, and offers to download the right models — 3B
@@ -29,11 +38,13 @@ The model line-up is picked **per machine** by the first-launch wizard:
 
 | Tier | Needs | brain | fast | tiny |
 |------|-------|-------|------|------|
-| **Full** | ≥16 GB RAM (or ≥11 GB VRAM) | `qwen3:14b` | `qwen3:8b` | `llama3.2:3b` |
-| **Standard** | ≥10 GB RAM | `qwen3:8b` | `qwen3:8b` | `llama3.2:3b` |
-| **Minimum** | anything less | `llama3.2:3b` | `llama3.2:3b` | `llama3.2:3b` |
+| **Full** | ≥16 GB RAM (or ≥11 GB VRAM) | `qwen3:14b` | `qwen3:8b` | `qwen2.5:1.5b` |
+| **Standard** | ≥10 GB RAM | `qwen3:8b` | `qwen3:8b` | `qwen2.5:1.5b` |
+| **Minimum** | anything less | `qwen2.5:1.5b` | `qwen2.5:1.5b` | `qwen2.5:1.5b` |
 
-(`nomic-embed-text` is always installed for memory/RAG; the 3B + embed models
+Every default model is **Apache-2.0** (Qwen + `nomic-embed-text`) — no Meta Llama
+licence anywhere in the line-up, so nothing needs a licence review to deploy.
+(`nomic-embed-text` is always installed for memory/RAG; the 1.5B + embed models
 are the minimum for GT to function.) Re-evaluate any time with `/setup`,
 inspect with `/doctor`.
 

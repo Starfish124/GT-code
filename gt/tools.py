@@ -51,6 +51,12 @@ class ReadFile(Tool):
 
     def run(self, args, ctx):
         p = ctx.resolve(args["path"])
+        if ctx.confine_enabled() and ctx.outside_workspace(p):
+            if not ctx.approve(f"Read {p}",
+                               "reading a file outside the workspace",
+                               force=True):
+                return ("DENIED: reading outside the workspace was declined. "
+                        "Work with files inside the launch folder.")
         if not p.exists():
             return f"ERROR: file not found: {p}"
         if p.is_dir():
@@ -80,14 +86,47 @@ class WriteFile(Tool):
     def run(self, args, ctx):
         p = ctx.resolve(args["path"])
         content = args.get("content", "")
-        if not ctx.approve(f"Write {p}", _file_preview(content), key="files"):
-            return "DENIED: user declined the write."
+        outside = ctx.confine_enabled() and ctx.outside_workspace(p)
+        if not ctx.approve(f"Write {p}", _file_preview(content),
+                           key="files", force=outside):
+            return ("DENIED: writing outside the workspace was declined."
+                    if outside else "DENIED: user declined the write.")
         try:
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(content, encoding="utf-8")
         except Exception as e:
             return f"ERROR writing {p}: {e}"
-        return f"OK: wrote {len(content)} chars to {p}"
+        note = _stub_note(p, content)
+        return f"OK: wrote {len(content)} chars to {p}{note}"
+
+
+# A file that is only a skeleton reads as success to a small model — observed
+# live: 'flappy bird' shipped an HTML whose whole body was '<!-- Game content
+# goes here -->', then 'its blank just a white page'. The write succeeds (a
+# skeleton is sometimes wanted) but the result SAYS it's a stub, so the model
+# fixes it in the same turn instead of announcing the task done.
+_STUB_MARK = re.compile(
+    r"(?i)(?:goes here|content here|your (?:code|content|logic|game) here|"
+    r"placeholder|to be implemented|implement(?:ation)? (?:this |goes )?later|"
+    r"todo:? implement|fill (?:this |me )?in|coming soon|"
+    r"rest of (?:the )?(?:code|file|logic))")
+_HTML_BODY = re.compile(r"(?is)<body[^>]*>(.*?)</body>")
+
+
+def _stub_note(path, content):
+    m = _STUB_MARK.search(content)
+    if m:
+        return (f"\nNOTE: the content contains a placeholder ('{m.group(0)}')"
+                " — the user asked for a WORKING result, not a skeleton. "
+                "Write the real content now (write_file again with the full "
+                "implementation).")
+    if str(path).lower().endswith((".html", ".htm")):
+        body = _HTML_BODY.search(content)
+        inner = re.sub(r"(?s)<!--.*?-->", "", body.group(1)).strip() if body else ""
+        if body and not inner and "<script" not in content.lower():
+            return ("\nNOTE: the page <body> is empty — it will render as a "
+                    "blank white page. Write the real markup and script now.")
+    return ""
 
 
 class EditFile(Tool):
@@ -124,8 +163,10 @@ class EditFile(Tool):
             return (f"ERROR: `find` matched {count} times; it must be unique. "
                     "Include more surrounding context.")
         detail = f"- {find}\n+ {replace}"
-        if not ctx.approve(f"Edit {p}", detail, key="files"):
-            return "DENIED: user declined the edit."
+        outside = ctx.confine_enabled() and ctx.outside_workspace(p)
+        if not ctx.approve(f"Edit {p}", detail, key="files", force=outside):
+            return ("DENIED: editing outside the workspace was declined."
+                    if outside else "DENIED: user declined the edit.")
         try:
             p.write_text(text.replace(find, replace), encoding="utf-8")
         except Exception as e:
@@ -330,8 +371,11 @@ class RunCommand(Tool):
 
         from .permissions import command_keys
         detail = command if workdir == ctx.cwd else f"(in {workdir})  {command}"
-        if not ctx.approve("Run command", detail, key=command_keys(command)):
-            return "DENIED: user declined to run the command."
+        outside = ctx.confine_enabled() and ctx.outside_workspace(workdir)
+        if not ctx.approve("Run command", detail, key=command_keys(command),
+                           force=outside):
+            return ("DENIED: running a command outside the workspace was declined."
+                    if outside else "DENIED: user declined to run the command.")
 
         if str(args.get("background", "")).lower() in ("true", "1", "yes"):
             return self._run_background(command, workdir, ctx)
@@ -776,7 +820,9 @@ _WEB_TOOLS = {"web_search", "web_fetch"}
 def active_tools(config) -> list:
     """The tools available given config — web tools drop out when
     web.enabled is false, run_agent when subagents.enabled is false."""
-    web_on = getattr(config, "web", {}).get("enabled", True)
+    # Secure-by-default: an ABSENT web key means OFF, not on. Web egress is only
+    # available when it's explicitly enabled in config.
+    web_on = getattr(config, "web", {}).get("enabled", False)
     sub_on = getattr(config, "data", {}).get(
         "subagents", {}).get("enabled", True)
     return [t for t in ALL_TOOLS

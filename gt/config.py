@@ -21,9 +21,9 @@ providers:
 models:
   brain:    {provider: ollama, model: "qwen3:14b"}
   fast:     {provider: ollama, model: "qwen3:8b"}
-  tiny:     {provider: ollama, model: "llama3.2:3b"}
-  reviewer: {provider: ollama, model: "llama3.2:3b"}
-  analyst:  {provider: ollama, model: "hermes3:3b"}
+  tiny:     {provider: ollama, model: "qwen2.5:1.5b"}
+  reviewer: {provider: ollama, model: "qwen2.5:1.5b"}
+  analyst:  {provider: ollama, model: "qwen2.5:1.5b"}
   embed:    {provider: ollama, model: "nomic-embed-text"}
 
 router:
@@ -42,7 +42,8 @@ performance:
   num_ctx: 8192
 
 memory:
-  auto_learn: true
+  auto_learn: false     # OFF: don't persist task-derived "lessons" (may capture
+                        # client details). Opt in only outside confidential work.
   recall_k: 5
   min_score: 0.28
 
@@ -61,8 +62,8 @@ intent_gate:
   ask_below: 45         # < asks one clarifying question instead
 
 hooks:
-  enabled: true         # lifecycle scripts (see repo config.yaml for examples)
-  timeout: 30
+  enabled: false        # OFF: hooks run your shell commands (code execution);
+  timeout: 30           # enable only with a config you control. See repo config.yaml.
 
 subagents:
   enabled: true         # run_agent: read-only research in a separate context
@@ -73,8 +74,14 @@ skills:
   enabled: true
   max: 2
 
+profile:
+  enabled: false        # OFF: opt-in behavioural profiling (see repo config.yaml)
+
 web:
-  enabled: true
+  enabled: false        # OFF: keep GT local/air-gapped; enable per task if needed
+
+security:
+  confine_to_workspace: true  # keep reads/writes/commands inside the launch folder
 
 data_dir: data
 """
@@ -115,7 +122,7 @@ def _is_placeholder(model_id: str) -> bool:
 
 def _match(want: str, served: list) -> str | None:
     """Exact id first, then a case-insensitive substring match either way
-    (config says 'hermes', server says 'hermes-3-llama-3.1-8b' → match)."""
+    (config says 'qwen3', server says 'qwen3:8b-instruct' → match)."""
     if want in served:
         return want
     low = want.lower()
@@ -154,6 +161,7 @@ class Config:
         self.agent = data.get("agent", {})
         self.memory = data.get("memory", {})
         self.web = data.get("web", {})
+        self.security = data.get("security", {})
         self.performance = data.get("performance", {})
         # data (memory db, history, permissions, setup marker) lives NEXT TO
         # the config file, never in the user's project directory.
@@ -213,7 +221,7 @@ class Config:
                     f"'{role}' will fail[/red]")
                 continue
             want = m["model"]
-            # The analyst is a specific small model (hermes3:3b) — never guess a
+            # The analyst is a specific small model (qwen2.5:1.5b) — never guess a
             # substitute for it, or it'd silently run on a big model. Leave it
             # exact; the Profiler simply no-ops when it isn't pulled.
             got = _match(want, ids)

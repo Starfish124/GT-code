@@ -29,6 +29,27 @@ class Ctx:
             p = self.cwd / p
         return p
 
+    def confine_enabled(self) -> bool:
+        """Is workspace confinement on? (config security.confine_to_workspace,
+        default True — secure by default even if the key is absent)."""
+        sec = getattr(self.config, "security", None)
+        if sec is None and hasattr(self.config, "data"):
+            sec = self.config.data.get("security", {})
+        return bool((sec or {}).get("confine_to_workspace", True))
+
+    def outside_workspace(self, p) -> bool:
+        """True if resolved path p escapes the workspace root (self.cwd).
+
+        Uses resolved, symlink-free paths so `..` traversal and absolute paths
+        that climb out are both caught. The workspace root itself counts as
+        inside. Only meaningful when confine_enabled() is True."""
+        try:
+            root = self.cwd.resolve()
+            target = Path(p).resolve()
+        except Exception:
+            return True   # if we can't reason about it, treat it as outside
+        return root != target and root not in target.parents
+
 
 class Tool:
     name = ""

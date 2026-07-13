@@ -10,9 +10,17 @@ Grant keys are coarse on purpose so the allowlist stays understandable:
   docs         — creating Excel / PowerPoint / Word documents
   cmd:<word>   — shell commands starting with <word> (cmd:git covers all git)
 
-Destructive-looking commands (rm -rf, format, del /s, …) ALWAYS prompt, even
-with auto-approve on or a matching grant — same idea as Claude Code refusing
-to auto-run dangerous commands.
+Destructive-looking commands (rm -rf, format, del /s, curl|sh, powershell -enc,
+reg add, …) ALWAYS prompt, even with auto-approve on or a matching grant — same
+idea as Claude Code refusing to auto-run dangerous commands. Actions that reach
+OUTSIDE the workspace (an absolute path or ../.. that escapes the launch folder)
+are treated the same way: always confirmed, never remembered (see the `force`
+argument to approve() and Ctx.outside_workspace).
+
+Only the explicit answers below grant — a stray word like 'abort' can never be
+misread as a permanent permission:
+  yes-once : y / yes / yeah / yep / ok / sure
+  always   : a / al / alw / always / allow
 """
 
 import json
@@ -23,9 +31,25 @@ from rich.panel import Panel
 from rich.text import Text
 
 _DANGEROUS = re.compile(
-    r"(rm\s+(-\w*[rf]\w*\s+)+|del\s+/[sq]|rd\s+/s|deltree|format\s+\w:|mkfs"
-    r"|diskpart|dd\s+if=|shutdown|reboot\b|reg\s+delete|rmdir\s+/s"
-    r"|git\s+push\s+.*--force|git\s+reset\s+--hard|:\(\)\s*\{)",
+    # --- destructive filesystem / disk ---
+    r"(rm\s+(?:-{1,2}\w+\s+)*-{1,2}(?:[rf]\w*|recursive|force)"   # rm -rf AND rm --recursive --force
+    r"|del\s+/[sq]|rd\s+/s|rmdir\s+/s|deltree|format\s+\w:|mkfs"
+    r"|diskpart|dd\s+if=|truncate\s+-s\s*0|>\s*/dev/sd|chmod\s+-R\s*0|chown\s+-R"
+    # --- power state ---
+    r"|shutdown|reboot\b"
+    # --- registry / persistence (Windows) ---
+    r"|reg\s+(?:add|delete)|schtasks\s+/create|bcdedit"
+    # --- pipe-to-shell / remote code execution ---
+    r"|(?:curl|wget|iwr|invoke-webrequest)\b[^\n|]*\|\s*(?:sh|bash|zsh|python|iex|invoke-expression)\b"
+    r"|\|\s*(?:sh|bash|zsh)\b"                                    # any … | sh
+    r"|certutil\s+(?:-\w+\s+)*-urlcache|bitsadmin|mshta|regsvr32\s+/i"
+    # --- obfuscated PowerShell ---
+    r"|powershell[^\n]*-e(?:nc|ncodedcommand)?\b"
+    r"|iex\b|invoke-expression|downloadstring"
+    # --- git history/force ---
+    r"|git\s+push\s+.*--force|git\s+reset\s+--hard"
+    # --- fork bombs (named or anonymous) ---
+    r"|\w*\(\)\s*\{[^}]*[|:]\s*\w+\s*&\s*\}|:\(\)\s*\{)",
     re.I,
 )
 
@@ -38,6 +62,11 @@ def command_key(command: str) -> str:
         name = name[:-4]
     return "cmd:" + name
 
+
+# Accepted answers at the permission prompt. Explicit sets (not a first-letter
+# match) so 'abort'/'argh'/'absolutely not' can never be misread as a grant.
+_YES_ANS = {"y", "yes", "yeah", "yep", "yup", "ok", "okay", "sure"}
+_ALWAYS_ANS = {"a", "al", "alw", "alws", "always", "allow", "always allow"}
 
 # Shell separators that chain independent commands: && || ; | & and newlines.
 _CHAIN = re.compile(r"&&|\|\||[;|&\n]")
@@ -81,14 +110,18 @@ class Permissions:
 
     # ---- the single entry point used by tools --------------------------------
 
-    def approve(self, title: str, detail: str = "", key=None) -> bool:
+    def approve(self, title: str, detail: str = "", key=None,
+                force: bool = False) -> bool:
         # `key` may be one grant key or a list of them (a chained command
         # needs EVERY segment granted before it skips the prompt).
+        # `force` marks an action that must ALWAYS be confirmed and can never be
+        # remembered — used for out-of-workspace paths (see Ctx.outside_workspace).
         keys = [key] if isinstance(key, str) else list(key or [])
         dangerous = bool(keys and any(k.startswith("cmd:") for k in keys)
                          and _DANGEROUS.search(detail or ""))
+        gate = dangerous or force   # bypasses (auto-approve, standing grants) off
 
-        if not dangerous:
+        if not gate:
             if self.auto_approve:
                 self.console.print(f"[dim]auto-approved: {title}[/dim]")
                 return True
@@ -98,14 +131,18 @@ class Permissions:
                     f"[dim]allowed ({', '.join(keys)}): {title}[/dim]")
                 return True
 
-        border = "red" if dangerous else "yellow"
-        header = ("! DANGEROUS — always requires confirmation"
-                  if dangerous else "Permission needed")
+        border = "red" if gate else "yellow"
+        if dangerous:
+            header = "! DANGEROUS — always requires confirmation"
+        elif force:
+            header = "! OUTSIDE WORKSPACE — always requires confirmation"
+        else:
+            header = "Permission needed"
         self.console.print(Panel(Text(detail or "(no details)"),
                                  title=f"{header} — {title}",
                                  border_style=border, expand=False))
         opts = "[y] yes once   [n] no"
-        if keys and not dangerous:
+        if keys and not gate:
             shown = " + ".join(f"'{k}'" for k in keys)
             opts = f"[y] yes once   [a] always allow {shown}   [n] no"
         self.console.print(f"  {opts}")
@@ -114,17 +151,16 @@ class Permissions:
         except (EOFError, KeyboardInterrupt):
             return False
 
-        # Match on the first letter so 'a', 'al', 'alw', 'always' all grant and
-        # 'y'/'yes'/'yeah' all allow — the transcript showed 'alw' being read as
-        # a denial, which is maddening.
-        first = ans[:1]
-        if first == "a" and keys and not dangerous:
+        # Explicit tokens only — a stray word like 'abort' or 'argh' must NOT be
+        # read as a permanent grant (the old "any answer starting with a" parse
+        # could hand out a standing, global permission on a typo).
+        if ans in _ALWAYS_ANS and keys and not gate:
             self.grants.update(keys)
             self._save()
             self.console.print(f"[green]ok: {', '.join(keys)} allowed from now "
                                f"on (manage with /permissions)[/green]")
             return True
-        return first == "y"
+        return ans in _YES_ANS
 
     # ---- management (the /permissions command) -------------------------------
 

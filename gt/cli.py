@@ -30,7 +30,7 @@ from . import wizard, machine, banner
 _PROMPT = HTML(f'<b><style fg="{PURPLE.lower()}">gt› </style></b>')
 
 # The 1B the /turbo speed profile swaps the resident model to.
-TURBO_MODEL = "llama3.2:1b"
+TURBO_MODEL = "qwen2.5:0.5b"
 
 HELP = """\
 [bold]Commands[/bold]
@@ -68,7 +68,8 @@ HELP = """\
   /remember <text>   save a note to long-term memory
   /lessons           show lessons GT has learned about itself
   /memory [reload]   memory stats + the GT.md files loaded into context
-  /forget <kind|all> clear memory (kinds: note, lesson, doc)
+  /forget <what>     wipe local data: note|lesson|doc|all (memory),
+                     history (typed prompts), logs, or everything
   /reset  /clear     clear the current conversation history
   /quit  /exit       leave
 
@@ -140,7 +141,7 @@ class GTShell:
             self.console.print(f"[dim]· CPU-only machine ({gpu}) — everyday turns "
                                f"run on the 3B; heavy builds escalate to the 8B, "
                                f"not the 14B (/model brain forces it)[/dim]")
-        if self.config.data.get("profile", {}).get("enabled", True):
+        if self.config.data.get("profile", {}).get("enabled", False):
             self.agent.profile_summary = self.profiler.summary()
         self._warmup(self.config.router.get("default", "tiny"))
         self.agent.hooks.fire("session_start",
@@ -625,10 +626,10 @@ class GTShell:
             served = self.llm.list_models(self.config.provider_base("ollama"))
         except LLMError:
             served = []
-        if not any("llama3.2" in s and "1b" in s.lower() for s in served):
+        if not any(TURBO_MODEL in s.lower() for s in served):
             self.console.print(
                 f"[yellow]{TURBO_MODEL} isn't pulled yet.[/yellow] It's a "
-                f"~1.3 GB download that loads and runs faster than the 3B on a "
+                f"~0.4 GB download that loads and runs faster than the 1.5B on a "
                 f"CPU box.\n  Pull it:  [bold]ollama pull {TURBO_MODEL}[/bold]"
                 f"   then run /turbo again.")
             return
@@ -727,9 +728,33 @@ class GTShell:
         self.console.print(f"[dim]· {self.profiler.path}  ·  /profile update to "
                            f"refresh now  ·  /profile clear to wipe[/dim]")
 
+    def _profile_notice(self):
+        """One-time notice the first time profiling actually runs (opt-in is via
+        config, but the person profiled should be told, once)."""
+        marker = self.config.data_dir / ".profile_consent"
+        try:
+            if marker.exists():
+                return
+        except Exception:
+            return
+        self.console.print(Panel(
+            Text("Preference profiling is enabled. GT will use a local model to "
+                 "build a short, durable profile of YOUR working preferences "
+                 "(stack, tone, conventions). It is stored as plain JSON on this "
+                 "machine only — never uploaded. View it with /profile, wipe it "
+                 "with /profile clear, and disable it with profile.enabled: false "
+                 "in config.yaml."),
+            title="Notice — preference profiling", border_style="yellow",
+            expand=False))
+        try:
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text("acknowledged", encoding="utf-8")
+        except Exception:
+            pass
+
     def _run_profile_analysis(self, manual=False):
         pcfg = self.config.data.get("profile", {})
-        if not pcfg.get("enabled", True):
+        if not pcfg.get("enabled", False):
             return
         log = self.agent.session_log
         if not log:
@@ -745,6 +770,7 @@ class GTShell:
                 self.console.print(f"[yellow]analyst model '{m}' isn't pulled.[/"
                                    f"yellow] Run: [bold]ollama pull {m}[/bold]")
             return
+        self._profile_notice()
         self.console.print(f"[dim]· learning from this session ({len(log)} turns) "
                            f"with {self.profiler.model_id()} — one moment "
                            f"(Ctrl-C to skip)…[/dim]")
@@ -761,13 +787,13 @@ class GTShell:
         pcfg = self.config.data.get("profile", {})
         n = int(pcfg.get("every_turns", 0) or 0)
         log = self.agent.session_log
-        if pcfg.get("enabled", True) and n > 0 and log and len(log) % n == 0:
+        if pcfg.get("enabled", False) and n > 0 and log and len(log) % n == 0:
             self._run_profile_analysis(manual=False)
 
     def _finish(self):
         """Exit hook — learn from the session before leaving (config on_quit)."""
         pcfg = self.config.data.get("profile", {})
-        if pcfg.get("enabled", True) and pcfg.get("on_quit", True):
+        if pcfg.get("enabled", False) and pcfg.get("on_quit", True):
             try:
                 self._run_profile_analysis(manual=False)
             except Exception:
@@ -957,8 +983,51 @@ class GTShell:
         elif arg in ("note", "lesson", "doc"):
             self.memory.clear(kind=arg)
             self.console.print(f"cleared all {arg}s.")
+        elif arg == "history":
+            n = self._wipe_history()
+            self.console.print(f"cleared prompt history ({n} file(s)).")
+        elif arg == "logs":
+            n = self._wipe_logs()
+            self.console.print(f"cleared {n} background-process log(s).")
+        elif arg == "everything":
+            self.memory.clear()
+            self.profiler.clear()
+            self.agent.profile_summary = ""
+            fh, fl = self._wipe_history(), self._wipe_logs()
+            self.console.print(f"wiped ALL local data: memory, profile, "
+                               f"prompt history ({fh}), and logs ({fl}).")
         else:
-            self.console.print("[yellow]usage: /forget <note|lesson|doc|all>[/yellow]")
+            self.console.print("[yellow]usage: /forget "
+                               "<note|lesson|doc|all|history|logs|everything>"
+                               "[/yellow]")
+
+    def _wipe_history(self) -> int:
+        """Delete the plaintext prompt history file(s)."""
+        removed = 0
+        for name in ("history.txt",):
+            f = self.config.data_dir / name
+            try:
+                if f.exists():
+                    f.unlink()
+                    removed += 1
+            except Exception:
+                pass
+        return removed
+
+    def _wipe_logs(self) -> int:
+        """Delete background-process stdout/stderr logs (data_dir/logs/*)."""
+        removed = 0
+        log_dir = self.config.data_dir / "logs"
+        try:
+            for f in log_dir.glob("*"):
+                try:
+                    f.unlink()
+                    removed += 1
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return removed
 
 
 def main():

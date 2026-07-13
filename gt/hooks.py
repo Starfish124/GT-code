@@ -37,7 +37,9 @@ class Hooks:
 
     def __init__(self, config, console):
         cfg = (getattr(config, "data", {}) or {}).get("hooks", {}) or {}
-        self.enabled = bool(cfg.get("enabled", True))
+        # Secure-by-default: hooks run arbitrary shell commands, so an absent
+        # key means OFF. They must be explicitly enabled in a trusted config.
+        self.enabled = bool(cfg.get("enabled", False))
         self.timeout = int(cfg.get("timeout", 30))
         self.console = console
         self.hooks = {ev: [h for h in (cfg.get(ev) or [])

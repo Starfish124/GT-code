@@ -28,25 +28,26 @@ models:
 
   # The RESIDENT default: routing, chat, quick questions AND everyday coding
   # all run on this one small model so it stays hot and nothing reloads between
-  # turns. GT only escalates to fast/brain for real builds. 3B-first = fast.
+  # turns. GT only escalates to fast/brain for real builds. Small-model-first
+  # = fast. qwen2.5:1.5b is Apache-2.0 (corporate-clean, no Meta licence).
   tiny:
     provider: ollama
-    model: "llama3.2:3b"
+    model: "qwen2.5:1.5b"
 
   # Reviews interactions and extracts reusable "lessons" (self-improving loop).
-  # Kept on the SAME 3B as 'tiny' on purpose: a bigger reviewer running in the
+  # Kept on the SAME model as 'tiny' on purpose: a bigger reviewer running in the
   # background after each task would evict the resident model and force a reload
-  # on the next turn — the exact churn 3B-first is designed to avoid.
+  # on the next turn — the exact churn small-model-first is designed to avoid.
   reviewer:
     provider: ollama
-    model: "llama3.2:3b"
+    model: "qwen2.5:1.5b"
 
   # Analyses your session (periodically, never per-turn) to learn your
-  # preferences — see the `profile` section. Pull it to enable:
-  #   ollama pull hermes3:3b
+  # preferences — see the `profile` section (OFF by default). Reuses the same
+  # small Apache-2.0 model as 'tiny', so nothing extra to pull.
   analyst:
     provider: ollama
-    model: "hermes3:3b"
+    model: "qwen2.5:1.5b"
 
   # Embeddings for RAG / long-term memory.
   embed:
@@ -55,11 +56,11 @@ models:
 
 router:
   enabled: true         # auto-pick a model per request; toggle at runtime with /route
-  default: tiny         # 3B-first: the resident 3B answers everyday turns; GT
-                        # escalates to fast (8B) / brain (14B) only for real
-                        # builds. One hot model = no reloads between turns.
+  default: tiny         # small-model-first: the resident 1.5B answers everyday
+                        # turns; GT escalates to fast (8B) / brain (14B) only for
+                        # real builds. One hot model = no reloads between turns.
   escalate_len: 160     # only requests longer than this spend a classifier word
-                        # deciding whether to escalate off the 3B; short turns
+                        # deciding whether to escalate off the resident model; short turns
                         # answer straight on the resident model (instant).
   prefer_fast_on_slow: true  # on a CPU-only machine (no GPU) a 14B crawls at a
                              # couple tok/s, so route 'brain' work to the 8B
@@ -98,7 +99,11 @@ performance:
                         # see/set live with /temp
 
 memory:
-  auto_learn: true      # after each task, the reviewer extracts a lesson into memory
+  auto_learn: false     # OFF by default (corporate/confidentiality): after a task
+                        # the reviewer would distil a reusable "lesson" into the
+                        # local memory.db, and a lesson drawn from a client task
+                        # can bake client names/paths into permanent storage. Turn
+                        # on only in a non-confidential context.
   recall_k: 5           # how many memories/lessons to pull into context per turn
   min_score: 0.28       # ignore memories below this similarity (0..1)
 
@@ -128,10 +133,13 @@ project_memory:
                         # concise beats complete).
 
 profile:
-  enabled: true         # learn YOUR preferences over time (favoured stack, tone,
-                        # conventions…) and bias GT's defaults to match. Glass-box:
-                        # view/clear it any time with /profile. Needs the analyst
-                        # model pulled (ollama pull hermes3:3b); no-ops without it.
+  enabled: false        # OFF by default. When on, an LLM builds a durable
+                        # behavioural profile of YOU (favoured stack, tone,
+                        # dislikes) — that is automated profiling of an
+                        # identifiable person, so it is strictly opt-in and prints
+                        # a one-time notice the first time you enable it. Glass-box:
+                        # view/clear it any time with /profile. Uses the analyst
+                        # model (qwen2.5:1.5b, same as tiny — already present).
   on_quit: true         # analyse the session when you exit (skippable with Ctrl-C).
                         # This loads the analyst model once — a few seconds on a
                         # GPU, ~30s on a CPU box — and does not run per turn.
@@ -158,10 +166,11 @@ intent_gate:
                         # gated (a long spec deserves a read-back)
 
 hooks:
-  enabled: true         # deterministic lifecycle scripts: YOUR shell commands
-                        # that always run at fixed points in GT's loop —
-                        # guarantees, where prompts are only suggestions.
-                        # Inspect what's configured with /hooks.
+  enabled: false        # OFF by default. Hooks run YOUR shell commands at fixed
+                        # points in the loop — powerful, but it means anyone who
+                        # can edit this file (or a config shipped in a repo) gets
+                        # code execution on your machine. Enable only with a config
+                        # you control and trust. Inspect what's configured with /hooks.
   timeout: 30           # seconds per hook before it's killed (fail-open)
   # Each event takes a list of {match, command, timeout} entries. `match` is
   # a regex on the tool name (pre_tool/post_tool only; omitted = every tool).
@@ -217,8 +226,22 @@ skills:
   # semantically per request. Nothing is fetched automatically.
 
 web:
-  enabled: true         # allow the web_search / web_fetch tools (needs internet).
-                        # set false to keep GT fully air-gapped/offline.
+  enabled: false        # OFF by default so GT is genuinely local/air-gapped out
+                        # of the box (the README promise). When on, web_search
+                        # sends the model's query to DuckDuckGo and web_fetch can
+                        # GET any URL the model picks — either can carry text
+                        # derived from your files off the machine. Turn on only
+                        # when you actually need internet access for a task.
+
+security:
+  confine_to_workspace: true  # keep file reads/writes and command execution
+                              # inside the folder GT was launched in. A path that
+                              # escapes the workspace (an absolute path or ../..)
+                              # ALWAYS prompts and can never be silenced by a
+                              # standing grant or auto-approve — so the agent (or
+                              # an injected instruction) can't quietly touch
+                              # ~/.ssh, another client's folder, etc. Set false to
+                              # restore whole-disk access (not recommended).
 
 # Where the vector DB + logs live (relative to the GT-code folder).
 data_dir: data

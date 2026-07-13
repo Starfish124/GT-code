@@ -6,7 +6,7 @@ same on the Windows target PC and the Mac build machine.
 
 recommend() maps that hardware to a model line-up. GT deliberately caps out at
 14B: anything bigger (27B+) is too slow for interactive coding on consumer
-hardware, so the largest tier is 3B + 8B + 14B, all served by Ollama.
+hardware, so the largest tier is 1.5B + 8B + 14B, all served by Ollama.
 """
 
 import os
@@ -145,10 +145,10 @@ def slow_for_large_models(hw: dict) -> bool:
 
 # Everything is served by Ollama — one local provider.
 # dl_gb ≈ download size (q4 quant), so the wizard can warn before pulling.
+# All Apache-2.0 (Qwen + nomic) — no Meta Llama licence anywhere in the lineup.
 CATALOG = {
-    "llama3.2:1b":      {"params": "1B",  "dl_gb": 1.3, "job": "/turbo speed profile"},
-    "llama3.2:3b":      {"params": "3B",  "dl_gb": 2.0, "job": "router + quick answers"},
-    "hermes3:3b":       {"params": "3B",  "dl_gb": 2.0, "job": "preference analyst (/profile)"},
+    "qwen2.5:0.5b":     {"params": "0.5B", "dl_gb": 0.4, "job": "/turbo speed profile"},
+    "qwen2.5:1.5b":     {"params": "1.5B", "dl_gb": 1.0, "job": "router + quick answers + analyst"},
     "qwen3:8b":         {"params": "8B",  "dl_gb": 5.2, "job": "everyday coding"},
     "qwen3:14b":        {"params": "14B", "dl_gb": 9.3, "job": "heavy coding & planning"},
     "nomic-embed-text": {"params": "137M", "dl_gb": 0.3, "job": "memory / RAG embeddings"},
@@ -156,23 +156,23 @@ CATALOG = {
 
 TIERS = {
     "full": {
-        "label": "Full (3B + 8B + 14B)",
-        # reviewer rides on the 3B, not the 8B: 3B-first keeps ONE model
-        # resident, and a background 8B reviewer would evict it every task.
+        "label": "Full (1.5B + 8B + 14B)",
+        # reviewer rides on the 1.5B, not the 8B: small-model-first keeps ONE
+        # model resident, and a background 8B reviewer would evict it every task.
         "lineup": {"brain": "qwen3:14b", "fast": "qwen3:8b",
-                   "tiny": "llama3.2:3b", "reviewer": "llama3.2:3b",
+                   "tiny": "qwen2.5:1.5b", "reviewer": "qwen2.5:1.5b",
                    "embed": "nomic-embed-text"},
     },
     "standard": {
-        "label": "Standard (3B + 8B)",
+        "label": "Standard (1.5B + 8B)",
         "lineup": {"brain": "qwen3:8b", "fast": "qwen3:8b",
-                   "tiny": "llama3.2:3b", "reviewer": "llama3.2:3b",
+                   "tiny": "qwen2.5:1.5b", "reviewer": "qwen2.5:1.5b",
                    "embed": "nomic-embed-text"},
     },
     "minimum": {
-        "label": "Minimum (3B only)",
-        "lineup": {"brain": "llama3.2:3b", "fast": "llama3.2:3b",
-                   "tiny": "llama3.2:3b", "reviewer": "llama3.2:3b",
+        "label": "Minimum (1.5B only)",
+        "lineup": {"brain": "qwen2.5:1.5b", "fast": "qwen2.5:1.5b",
+                   "tiny": "qwen2.5:1.5b", "reviewer": "qwen2.5:1.5b",
                    "embed": "nomic-embed-text"},
     },
 }

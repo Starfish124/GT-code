@@ -127,7 +127,7 @@ REM ---- 10. models present -------------------------------------------
 if errorlevel 1 (
   echo [WARN] 10. Ollama serves no models yet.
   echo          FIX: type gt and let the first-launch wizard download them,
-  echo          or manually:  ollama pull llama3.2:3b
+  echo          or manually:  ollama pull qwen2.5:1.5b
 ) else (
   echo [ OK ] 10. Ollama has models available.
 )

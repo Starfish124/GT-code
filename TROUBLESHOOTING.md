@@ -228,7 +228,7 @@ local — the proxy only matters for downloads.)
 failed. Either re-run it (`/setup` inside GT) or pull by hand:
 
 ```bat
-ollama pull llama3.2:3b          :: minimum for GT to function
+ollama pull qwen2.5:1.5b         :: minimum for GT to function
 ollama pull nomic-embed-text     :: memory/RAG
 ollama pull qwen3:8b             :: standard tier
 ollama pull qwen3:14b            :: full tier (16 GB+ RAM)
