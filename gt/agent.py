@@ -236,6 +236,12 @@ _INTENT = re.compile(
     r"(?:create|proceed|start|set(?:ting)? up|build|write|install|make|add|"
     r"update|run|fix|implement|generate|configure|move|continue|go ahead)")
 
+# "thanks, maybe later" / "not now" after a presented plan — the user is
+# declining, not steering the task, so the plan lapses silently instead of
+# getting the carry-out-the-plan push (see _resolve_turn).
+_DEFER = re.compile(r"(?i)\b(later|not (?:now|yet|today)|maybe|hold (?:off|on)|"
+                    r"wait|skip|nah|never ?mind|don'?t|forget it)\b")
+
 # What to feed back for each kind of stall, instead of ending the turn.
 _NUDGE = {
     "badjson": ("[system] That looked like a tool call but it was NOT valid "
@@ -344,9 +350,16 @@ class Agent:
         # user's go" — the next affirmative turn builds.
         self.intent_gate = IntentGate(llm, config, console)
         self._pending_plan = False
-        # The model role the current task is running on — while the checklist
-        # has open items, follow-up turns stick to it (see _resolve_turn).
+        # The model role the current task is running on — while the task is
+        # live (open todos OR recent tool work — small builds never write a
+        # checklist), follow-up turns stick to it (see _resolve_turn).
         self._task_role = None
+        self._task_live = False
+        # Set when a turn picks up a pending plan (an affirmative OR a
+        # steer) — run() then reminds the model that the plan was only ever
+        # PRESENTED and nothing exists yet (observed live: told to 'start
+        # the game' after a plan, the 8B tried to run files it never wrote).
+        self._plan_pickup = False
 
         # Tools available this session (web tools dropped if web.enabled=false).
         self.tools = {t.name: t for t in active_tools(config)}
@@ -393,6 +406,17 @@ class Agent:
         # (the flappy-bird failure). chat_only is the strict subset that gets the
         # lean, no-tools prompt AND no injected playbook.
         role, conversational, chat_only, prompt_mode = self._resolve_turn(user_msg)
+        # Picking up a plan (by "go" or by a steer): nothing has been built
+        # yet, and small models happily 'run' files that don't exist. Say so.
+        plan_block = ""
+        if self._plan_pickup:
+            self._plan_pickup = False
+            plan_block = ("Last turn you only PRESENTED A PLAN — none of it "
+                          "has been executed and no files were created. This "
+                          "message steers that task: carry the plan out now "
+                          "(adjusted for this message). If asked to start or "
+                          "run the result, create the planned files first, "
+                          "then run.")
         # Remembered so a sub-agent spawned this turn runs on the SAME
         # (already-loaded) model — context isolation without swap churn.
         self._turn_role = role
@@ -485,7 +509,7 @@ class Agent:
             user_msg, skills_block(picked, self.skills_inject_chars),
             memory_block, todos_block,
             hook_block=self.hooks.user_prompt(user_msg, cwd=self.cwd),
-            clarify_block=clarify_block)
+            clarify_block=clarify_block, plan_block=plan_block)
 
         # Working message list for this turn (includes intermediate tool steps).
         # The session summary (if any) rides between the system prompt and the
@@ -685,11 +709,21 @@ class Agent:
             self.console.print("\n[yellow](interrupted — keeping the work "
                                "done so far in this turn)[/yellow]")
 
-        # A work turn that actually ran tools sets the sticky task role:
-        # while the checklist stays open, follow-ups run on this same
-        # (already warm) model instead of being re-classified as chat.
+        # A work turn that actually ran tools marks the task LIVE and sets
+        # the sticky task role: follow-ups run on this same (already warm)
+        # model instead of being re-classified as chat. A work turn that
+        # concludes in pure prose releases the liveness — the task is done
+        # or was never real work (an interrupted turn keeps it: 'continue'
+        # must land back on the working model). Plan turns touch neither.
         if trace and not conversational:
             self._task_role = role
+            # A plan turn's trace is just denied write attempts — only real
+            # WORK marks the task live.
+            if prompt_mode == "work":
+                self._task_live = True
+        elif (not conversational and prompt_mode == "work"
+              and not trace and not interrupted):
+            self._task_live = False
 
         # Persist the turn. The user message goes in AS SENT (cache prefix
         # stays valid); intermediate tool chatter is replaced by a compact
@@ -781,6 +815,8 @@ class Agent:
         self.session_summary = ""
         self._pending_plan = False
         self._task_role = None
+        self._task_live = False
+        self._plan_pickup = False
 
     def compact_now(self):
         """Fold the WHOLE conversation into the session summary (/compact).
@@ -953,6 +989,15 @@ class Agent:
         if self.mode == "plan":
             return (self.force_role or self._forced_role("brain")), False, False, "plan"
         if pending and AFFIRM.match(user_msg or ""):
+            self._plan_pickup = True
+            return (self.force_role or self._forced_role("fast")), False, False, "work"
+        # The user answered a plan with a steer instead of "go" — that's
+        # still the planned task: stay a work turn on the working model and
+        # pick the plan up (adjusted). A decline ("thanks, maybe later")
+        # must NOT get the carry-it-out push, so it lapses silently.
+        if (pending and not self._chat_only(user_msg)
+                and not _DEFER.search(user_msg or "")):
+            self._plan_pickup = True
             return (self.force_role or self._forced_role("fast")), False, False, "work"
         # "use the 8b (model) on this" — honour a natural-language model
         # request for this turn (observed live: the user asked exactly that
@@ -966,12 +1011,17 @@ class Agent:
         chat_only = self._chat_only(user_msg)
         # Mid-task continuity (observed live: the 8B built flappy bird, then
         # 'start the game' and 'its blank just a white page' dropped to the
-        # 3B at chat temperature): while the checklist has open items, a
-        # follow-up IS work on that task — it stays a work turn and runs on
-        # the model that is doing the task (already warm). Genuine small
-        # talk (chat_only) still slips through as chat.
-        if (not chat_only and not self.force_role
-                and any(t.get("status") != "done" for t in self.todos)):
+        # 3B at chat temperature): while the task is live, a follow-up IS
+        # work on that task — it stays a work turn and runs on the model
+        # that is doing the task (already warm). "Live" = the checklist has
+        # open items OR the last work turn ran tools (_task_live — small
+        # builds often never write todos, and the stickiness must not depend
+        # on the model remembering to). Genuine small talk (chat_only) still
+        # slips through as chat; a work turn that concludes in prose
+        # releases _task_live (see run()).
+        task_live = (any(t.get("status") != "done" for t in self.todos)
+                     or (self._task_live and self._task_role))
+        if not chat_only and not self.force_role and task_live:
             return self._higher_role(role, self._task_role), False, False, "work"
         return role, conversational, chat_only, ("chat" if chat_only else "work")
 
@@ -1064,6 +1114,13 @@ class Agent:
             return "codedump"
         if trace and trace[-1].startswith("- FAILED"):
             return "failed"
+        # A plan-pickup turn (the user approved or steered a presented plan)
+        # that has executed NOTHING yet — observed live: told to 'start the
+        # game' after a plan, the 8B re-described the plan in prose and
+        # ended the turn with zero files written. The approval already
+        # happened; prose is not an acceptable answer until a tool has run.
+        if getattr(self, "_pickup_turn", False) and not trace:
+            return "pickup"
         # Verbatim repeat of the previous turn's answer — the 'yes' → same
         # message → 'yes' lock. Compare against the prose part only (the
         # stored history entry may carry an [actions taken] digest).

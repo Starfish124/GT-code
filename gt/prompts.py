@@ -271,12 +271,15 @@ approve (e.g. "go", "do it", "build it"), the next turn builds."""
 
 def turn_context(user_msg: str, skills_block: str = "",
                  memory_block: str = "", todos_block: str = "",
-                 hook_block: str = "", clarify_block: str = "") -> str:
+                 hook_block: str = "", clarify_block: str = "",
+                 plan_block: str = "") -> str:
     """Attach the per-turn dynamic context to the user message."""
     parts = []
     if clarify_block:
         parts.append("[clarification — GT asked this before starting and the "
                      f"user answered; honour the answer]\n{clarify_block}")
+    if plan_block:
+        parts.append(f"[context: pending plan]\n{plan_block}")
     if todos_block:
         parts.append("[your task checklist so far — keep it current with "
                      f"write_todos as you finish each step]\n{todos_block}")
