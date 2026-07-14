@@ -21,7 +21,10 @@ from . import machine
 # Bump when the tier→lineup mapping changes (e.g. the reviewer moved onto the
 # 3B for 3B-first). An already-set-up machine whose saved setup.json predates
 # this refreshes its lineup automatically on next launch — no manual /setup.
-SCHEMA_V = 2
+# v3 = the Apache-2.0 line-up (llama3.2/hermes3 → qwen2.5); the migration
+# never downloads, so a model the new lineup names but the box hasn't pulled
+# surfaces through the normal startup check / doctor pull hint.
+SCHEMA_V = 3
 
 
 def _marker(config):

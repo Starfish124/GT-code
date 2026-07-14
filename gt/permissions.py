@@ -18,9 +18,10 @@ are treated the same way: always confirmed, never remembered (see the `force`
 argument to approve() and Ctx.outside_workspace).
 
 Only the explicit answers below grant — a stray word like 'abort' can never be
-misread as a permanent permission:
-  yes-once : y / yes / yeah / yep / ok / sure
-  always   : a / al / alw / always / allow
+misread as a permanent permission. Every label the prompt DISPLAYS is itself an
+accepted answer (a live session typed the shown 'yes once' and was denied):
+  yes-once : y / yes / yeah / yep / ok / sure / once / yes once
+  always   : a / al / alw / always / allow / always allow
 """
 
 import json
@@ -65,7 +66,10 @@ def command_key(command: str) -> str:
 
 # Accepted answers at the permission prompt. Explicit sets (not a first-letter
 # match) so 'abort'/'argh'/'absolutely not' can never be misread as a grant.
-_YES_ANS = {"y", "yes", "yeah", "yep", "yup", "ok", "okay", "sure"}
+# The visible option labels ('yes once') MUST be in here — users type what
+# they see on screen.
+_YES_ANS = {"y", "yes", "yeah", "yep", "yup", "ok", "okay", "sure",
+            "once", "yes once"}
 _ALWAYS_ANS = {"a", "al", "alw", "alws", "always", "allow", "always allow"}
 
 # Shell separators that chain independent commands: && || ; | & and newlines.
@@ -141,10 +145,12 @@ class Permissions:
         self.console.print(Panel(Text(detail or "(no details)"),
                                  title=f"{header} — {title}",
                                  border_style=border, expand=False))
-        opts = "[y] yes once   [n] no"
+        # \[y] — escaped, or Rich markup silently EATS the bracketed key hints
+        # (a live session saw bare 'yes once  always allow  no' with no keys).
+        opts = r"\[y] yes once   \[n] no"
         if keys and not gate:
             shown = " + ".join(f"'{k}'" for k in keys)
-            opts = f"[y] yes once   [a] always allow {shown}   [n] no"
+            opts = rf"\[y] yes once   \[a] always allow {shown}   \[n] no"
         self.console.print(f"  {opts}")
         try:
             ans = self.prompt_fn("  allow? ").strip().lower()

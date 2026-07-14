@@ -233,6 +233,41 @@ check("write_todos rejects a non-list", "ERROR" in WriteTodos().run(
 check("render_todos shows a checkbox per item",
       "[x]" in render_todos([{"task": "a", "status": "done"}])
       and "[ ]" in render_todos([{"task": "b", "status": "pending"}]))
+_tctx.todos[:] = []
+WriteTodos().run({"todos": [{"task": "ship it", "status": "doing"}]}, _tctx)
+check("identical resend is a no-op with a move-on nudge (live: 250 wasted tok)",
+      "unchanged" in WriteTodos().run(
+          {"todos": [{"task": "ship it", "status": "doing"}]}, _tctx)
+      and len(_tctx.todos) == 1)
+check("a status flip is applied, never treated as unchanged",
+      "unchanged" not in WriteTodos().run(
+          {"todos": [{"task": "ship it", "status": "done"}]}, _tctx)
+      and _tctx.todos[0]["status"] == "done")
+
+print("\nself-venv rail (live: 'python -m venv .venv' over the env running GT)")
+from gt.tools import RunCommand
+if sys.prefix != sys.base_prefix:        # tests run from GT's venv
+    _own = Path(sys.prefix).resolve()
+    check("recreating GT's own venv by absolute path is refused",
+          "ERROR" in (RunCommand._self_venv_guard(
+              f'python -m venv "{_own}"', tmp) or ""))
+    check("relative target resolving to GT's venv is refused (the live chain)",
+          "ERROR" in (RunCommand._self_venv_guard(
+              f"python -m venv {_own.name} && "
+              rf"{_own.name}\Scripts\pip install openpyxl", _own.parent) or ""))
+    check("flags before the target do not hide it",
+          "ERROR" in (RunCommand._self_venv_guard(
+              f'python -m venv --clear "{_own}"', tmp) or ""))
+check("a fresh project venv passes the rail",
+      RunCommand._self_venv_guard("python -m venv .venv", tmp) is None)
+check("non-venv python commands pass the rail",
+      RunCommand._self_venv_guard("python -m pip install venv-helper", tmp)
+      is None)
+
+print("\nprompt examples name no concrete deliverable (the 1.5B parroted one)")
+import gt.prompts as _pmod
+check("'flappy' is scrubbed from every prompt template",
+      "flappy" not in Path(_pmod.__file__).read_text(encoding="utf-8").lower())
 
 print("\nask_user tool")
 from gt.tools import AskUser
@@ -570,6 +605,29 @@ check("nothing ever recommends >14B",
       all("27b" not in m and "28b" not in m
           for t in machine.TIERS.values() for m in t["lineup"].values()))
 
+print("\nsetup auto-migration reaches the Apache lineup (live: launch still "
+      "warmed llama3.2:3b)")
+from gt import wizard as _wz
+import json as _wjson
+import tempfile as _wtmp
+check("SCHEMA_V bumped for the Meta→Qwen lineup swap", _wz.SCHEMA_V == 3)
+with _wtmp.TemporaryDirectory() as _wd:
+    class _WCfg:
+        data_dir = Path(_wd)
+        models = {"tiny": {"provider": "ollama", "model": "llama3.2:3b"}}
+    (_WCfg.data_dir / "setup.json").write_text(_wjson.dumps(
+        {"done": True, "v": 2,
+         "hardware": {"ram_gb": 28, "vram_gb": None, "cores": 16},
+         "lineup": {"tiny": "llama3.2:3b"}}), encoding="utf-8")
+    _wz.ensure(_WCfg, llm=None, console=None, prompt_fn=None)
+    _wstate = _wjson.loads(
+        (_WCfg.data_dir / "setup.json").read_text(encoding="utf-8"))
+    check("a v2 box refreshes its saved lineup off the old Meta models",
+          _wstate["v"] == 3
+          and _wstate["lineup"]["tiny"] == "qwen2.5:1.5b")
+    check("the running config is migrated too (no manual /setup needed)",
+          _WCfg.models["tiny"]["model"] == "qwen2.5:1.5b")
+
 print("\npermissions")
 from gt.permissions import Permissions, command_key, _DANGEROUS
 store = Path(__file__).resolve().parent / "_perms.json"
@@ -592,6 +650,22 @@ _alw = iter(["alw"])   # the transcript typed 'alw' and got a denial — must gr
 _pa = Permissions(Console(force_terminal=False), lambda _: next(_alw), store)
 check("'alw' is read as always-allow, not a denial",
       _pa.approve("Run command", "npm ci", key="cmd:npm") and "cmd:npm" in _pa.grants)
+# The prompt DISPLAYS 'yes once' — typing exactly that must allow (a live
+# session typed it twice and both installs were recorded as declined).
+for _lbl in ("yes once", "once"):
+    _po = Permissions(Console(force_terminal=False),
+                      lambda _p, _l=_lbl: _l, store)
+    check(f"'{_lbl}' (the displayed label) allows once without granting",
+          _po.approve("Run command", "pip install x", key="cmd:pip")
+          and "cmd:pip" not in _po.grants)
+import io as _pio
+_pbuf = _pio.StringIO()
+_pk = Permissions(Console(file=_pbuf, force_terminal=False, width=120),
+                  lambda _: "n", store)
+_pk.approve("Run command", "pip install x", key="cmd:pip")
+check("key hints render literally, not eaten as Rich markup",
+      "[y] yes once" in _pbuf.getvalue()
+      and "[a] always allow" in _pbuf.getvalue())
 
 print("\nchained commands need a grant for EVERY segment")
 from gt.permissions import command_keys

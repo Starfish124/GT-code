@@ -127,12 +127,30 @@ class GTShell:
         except (EOFError, KeyboardInterrupt):
             return ""
 
+    def _warn_own_repo(self):
+        """Warn when the workspace is GT's own code folder.
+
+        A build started there lands inside GT's repo (and live it tried to
+        recreate GT's own .venv). Only fires on an editable/source install,
+        where the gt package sits directly under the workspace.
+        """
+        try:
+            repo = Path(__file__).resolve().parents[1]
+            if self.agent.cwd.resolve() == repo:
+                self.console.print(
+                    "[yellow]· heads up: this is GT's own code folder — builds "
+                    "would land in GT's repo. Start gt from your project "
+                    "folder, or move now with /cd <path>.[/yellow]")
+        except OSError:
+            pass
+
     # ---- main loop ----------------------------------------------------------
 
     def run(self):
         from . import __version__
         banner.render(self.console, __version__)
         self.console.print(f"\n[dim]workspace:[/dim] {self.agent.cwd}")
+        self._warn_own_repo()
         self._show_project_memory_line()
         wizard.ensure(self.config, self.llm, self.console, self.session.prompt)
         self._startup_check()

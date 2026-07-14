@@ -11,6 +11,7 @@ import os
 import re
 import signal
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -369,6 +370,10 @@ class RunCommand(Tool):
             return f"ERROR: cwd does not exist: {workdir}"
         workdir, command = self._fold_cd(command, workdir, ctx)
 
+        guard = self._self_venv_guard(command, workdir)
+        if guard:
+            return guard
+
         from .permissions import command_keys
         detail = command if workdir == ctx.cwd else f"(in {workdir})  {command}"
         outside = ctx.confine_enabled() and ctx.outside_workspace(workdir)
@@ -383,6 +388,45 @@ class RunCommand(Tool):
 
     _CD = re.compile(r"^cd\s+(\"[^\"]+\"|'[^']+'|[^&;|]+?)\s*(?:&&|;)\s*(.+)$",
                      re.S)
+
+    # Everything after `-m venv` / `virtualenv` up to the next chain operator.
+    _VENV = re.compile(r"(?:-m\s+venv|\bvirtualenv)\s+([^&|;\n]+)", re.I)
+
+    @classmethod
+    def _self_venv_guard(cls, command, workdir):
+        """Refuse to (re)create the venv that is running GT itself.
+
+        Live on Windows: GT was launched from its own repo, the model ran
+        `python -m venv .venv` there, and creation failed with Errno 13
+        because that .venv's python.exe IS the process running GT. Catch it
+        before the user is even prompted and steer the model to a project
+        folder instead.
+        """
+        if sys.prefix == sys.base_prefix:   # GT not in a venv — nothing to protect
+            return None
+        try:
+            own = Path(sys.prefix).resolve()
+        except OSError:
+            return None
+        for m in cls._VENV.finditer(command):
+            for tok in m.group(1).split():
+                tok = tok.strip("\"'")
+                if tok.startswith("-"):     # a flag like --clear, keep looking
+                    continue
+                t = Path(tok).expanduser()
+                t = t if t.is_absolute() else workdir / t
+                try:
+                    hit = t.resolve() == own
+                except OSError:
+                    hit = False
+                if hit:
+                    return (f"ERROR: '{tok}' is the Python environment running "
+                            "GT itself — recreating it would fail (its python "
+                            "is in use) and would break GT. Work in a project "
+                            "folder instead: create the venv in a subdirectory "
+                            "or under a different name.")
+                break                       # only the first non-flag token is the target
+        return None
 
     @classmethod
     def _fold_cd(cls, command, workdir, ctx):
@@ -630,6 +674,11 @@ class WriteTodos(Tool):
                               else "pending"})
         if not items:
             return "ERROR: no valid todos in the list."
+        if items == list(ctx.todos):
+            # Live: after a plan turn, the build turn burned 250+ tokens (and
+            # minutes of CPU prefill) re-sending the identical checklist.
+            return ("OK: checklist unchanged — it is already recorded, do not "
+                    "resend it. Start on the next pending item now.")
         ctx.todos[:] = items          # replace in place so the agent's list updates
         done = sum(1 for t in items if t["status"] == "done")
         doing = next((t["task"] for t in items if t["status"] == "doing"), None)
