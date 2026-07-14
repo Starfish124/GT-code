@@ -1,7 +1,7 @@
 GT-Code your own local coding agent! (please scroll lower to see trouble shooting)
 
 A small, self-hosted CLI coding assistant, like Claude Code, but running
-**on your machine** with your local models — no cloud LLM, no API keys. It uses
+**on your machine** with your local models no cloud LLM, no API keys. (no internet usage either) It uses
 3B, 8B and 14B parameter models (input needed for other models).
 
 **On the network:** the model itself runs locally (Ollama on localhost) and GT
