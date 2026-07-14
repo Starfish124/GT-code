@@ -29,7 +29,7 @@ from . import wizard, machine, banner
 # The interactive prompt, in GT purple (prompt_toolkit wants a lowercase hex).
 _PROMPT = HTML(f'<b><style fg="{PURPLE.lower()}">gt› </style></b>')
 
-# The 1B the /turbo speed profile swaps the resident model to.
+# The 0.5B the /turbo speed profile swaps the resident model to.
 TURBO_MODEL = "qwen2.5:0.5b"
 
 HELP = """\
@@ -45,7 +45,7 @@ HELP = """\
   /mode [chat|code|plan|auto]  force GT's behaviour: chat = only talk, code =
                      always build, plan = plan first, auto = decide per message
   /model <role|off>  pin a model role (brain/fast/tiny) or 'off' to auto-route
-  /turbo [on|off]    swap the resident model to a 1B for maximum speed (revert
+  /turbo [on|off]    swap the resident model to a 0.5B for maximum speed (revert
                      with /turbo off) — great on a slow/CPU-only machine
   /benchmark         time a standard set of turns on THIS machine (shareable)
   /profile [clear|update]  show what GT has learned about your preferences over
@@ -157,8 +157,8 @@ class GTShell:
         if self.router.prefer_fast:
             gpu = (self.router.slow_hw or {}).get("gpu") or "no GPU"
             self.console.print(f"[dim]· CPU-only machine ({gpu}) — everyday turns "
-                               f"run on the 3B; heavy builds escalate to the 8B, "
-                               f"not the 14B (/model brain forces it)[/dim]")
+                               f"run on the resident small model; work escalates "
+                               f"to the 8B, not the 14B (/model brain forces it)[/dim]")
         if self.config.data.get("profile", {}).get("enabled", False):
             self.agent.profile_summary = self.profiler.summary()
         self._warmup(self.config.router.get("default", "tiny"))
@@ -489,16 +489,16 @@ class GTShell:
             except KeyError:
                 self.console.print(f"  {role:<9} [red]unconfigured[/red]")
         if self.router.prefer_fast:
-            self.console.print("[bold]Routing[/bold]  3B-first, CPU-only — "
-                               "everyday turns stay on the 3B; substantial "
-                               "builds escalate to the 8B (the 14B is skipped "
-                               "here). [dim]/model brain forces the 14B; set "
-                               "router.prefer_fast_on_slow: false to allow "
-                               "it[/dim]")
+            self.console.print("[bold]Routing[/bold]  small-model-first, "
+                               "CPU-only — the resident tiny model talks and "
+                               "routes; tool work runs on the 8B (the 14B is "
+                               "skipped here). [dim]/model brain forces the "
+                               "14B; set router.prefer_fast_on_slow: false to "
+                               "allow it[/dim]")
         else:
-            self.console.print("[bold]Routing[/bold]  3B-first — the resident "
-                               "3B answers everyday turns; 8B for substantial "
-                               "coding, 14B for architecture/full builds")
+            self.console.print("[bold]Routing[/bold]  small-model-first — the "
+                               "resident tiny model talks and routes; 8B for "
+                               "tool work, 14B for architecture/full builds")
         self._startup_check()
 
     def _show_models(self):
@@ -612,11 +612,12 @@ class GTShell:
         self._warmup(arg)  # start loading it now, not at the first prompt
 
     def _turbo(self, arg):
-        """Swap the resident (tiny) model to a 1B for maximum speed, or back.
+        """Swap the resident (tiny) model to a 0.5B for maximum speed, or back.
 
-        On a slow/CPU-only box the 3B's load + prefill dominate; a 1B loads and
-        runs noticeably faster at some cost to quality. Session-only — builds
-        still escalate to the 8B/14B, and /turbo off restores the 3B.
+        On a slow/CPU-only box the tiny model's load + prefill dominate; a
+        0.5B loads and runs noticeably faster at some cost to quality.
+        Session-only — work still escalates to the 8B/14B, and /turbo off
+        restores the configured tiny model.
         """
         tiny = self.config.models.get("tiny")
         if not tiny:

@@ -122,7 +122,8 @@ class Permissions:
         # remembered — used for out-of-workspace paths (see Ctx.outside_workspace).
         keys = [key] if isinstance(key, str) else list(key or [])
         dangerous = bool(keys and any(k.startswith("cmd:") for k in keys)
-                         and _DANGEROUS.search(detail or ""))
+                         and _DANGEROUS.search(
+                             detail if isinstance(detail, str) else ""))
         gate = dangerous or force   # bypasses (auto-approve, standing grants) off
 
         if not gate:
@@ -142,7 +143,11 @@ class Permissions:
             header = "! OUTSIDE WORKSPACE — always requires confirmation"
         else:
             header = "Permission needed"
-        self.console.print(Panel(Text(detail or "(no details)"),
+        # `detail` is usually a string, but tools may pass a rich renderable
+        # (write_file sends a syntax-highlighted preview of the code).
+        body = (Text(detail or "(no details)") if isinstance(detail, str)
+                or detail is None else detail)
+        self.console.print(Panel(body,
                                  title=f"{header} — {title}",
                                  border_style=border, expand=False))
         # \[y] — escaped, or Rich markup silently EATS the bracketed key hints

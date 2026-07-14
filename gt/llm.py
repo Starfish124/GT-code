@@ -10,11 +10,61 @@ model listing use Ollama's OpenAI-compatible /v1 endpoints.
 """
 
 import json
+import re
+
 import requests
 
 
 class LLMError(Exception):
     """Friendly, user-facing error (bad connection, model not loaded, etc.)."""
+
+
+_DURATION = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([smh]?)\s*$", re.I)
+
+
+def _parse_seconds(value, default):
+    """Tolerant seconds parse for performance.llm_timeout.
+
+    The key sits directly under keep_alive: 8h in config.yaml, so users will
+    naturally write llm_timeout: 30m — accept plain numbers and s/m/h duration
+    strings, and fall back to the default on anything else instead of killing
+    every turn with a raw int() traceback.
+    """
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, (int, float)):
+        return int(value)
+    m = _DURATION.match(str(value or ""))
+    if not m:
+        return default
+    mult = {"": 1, "s": 1, "m": 60, "h": 3600}[m.group(2).lower()]
+    return int(float(m.group(1)) * mult)
+
+
+def _looks_like_read_timeout(exc) -> bool:
+    """Did this ConnectionError actually START as a read timeout?
+
+    requests re-raises urllib3's ReadTimeoutError from iter_content() as a
+    ConnectionError once streaming has begun — so a mid-generation stall
+    (machine starts swapping after the first token) must be recognised here,
+    or the user is told "can't reach Ollama" about a server that is fine.
+    """
+    try:
+        from urllib3.exceptions import ReadTimeoutError
+    except ImportError:
+        ReadTimeoutError = ()
+    seen, stack = set(), [exc]
+    while stack:
+        e = stack.pop()
+        if e is None or id(e) in seen:
+            continue
+        seen.add(id(e))
+        if isinstance(e, ReadTimeoutError):
+            return True
+        stack.extend((e.__cause__, e.__context__))
+        stack.extend(a for a in getattr(e, "args", ())
+                     if isinstance(a, BaseException))
+    return "read timed out" in str(exc).lower()
 
 
 class LLM:
@@ -30,7 +80,7 @@ class LLM:
     # ---- chat ---------------------------------------------------------------
 
     def chat(self, role, messages, stream=True, temperature=None,
-             on_token=None, timeout=600, tools=None):
+             on_token=None, timeout=None, tools=None):
         """Return the assistant's full text. If stream=True, on_token(str) is
         called with each incremental chunk as it arrives. Timing details of
         the call land in self.last_metrics.
@@ -44,16 +94,38 @@ class LLM:
         Ollama's raw shape ([{"function": {"name", "arguments"}}, ...])."""
         if temperature is None:
             temperature = float(self._perf("temperature", 0.3))
+        if timeout is None:
+            # On a CPU-only box, model load + prompt prefill can run 10+
+            # minutes with ZERO bytes on the wire (Ollama sends nothing until
+            # the first token) — a live turn died at 600s while the prefill
+            # was legitimately at ~790s. Default high; esc/Ctrl-C is the way
+            # to bail early, not a network timeout.
+            timeout = _parse_seconds(self._perf("llm_timeout", 1800), 1800)
         spec = self.config.model_for(role)
         self.last_metrics = None
         self.last_tool_calls = []
         try:
             return self._chat_ollama(spec, messages, stream, temperature,
                                      on_token, timeout, tools)
-        except requests.exceptions.ConnectionError:
+        except requests.exceptions.ConnectionError as e:
+            # A read timeout AFTER streaming starts arrives wrapped as a
+            # ConnectionError (requests re-raises it from iter_content) —
+            # that is a stall, not a dead server; diagnose it as one.
+            if _looks_like_read_timeout(e):
+                raise LLMError(self._timeout_msg(spec, timeout))
             raise LLMError(self._conn_msg(spec))
         except requests.exceptions.Timeout:
-            raise LLMError(f"'{spec['model']}' timed out after {timeout}s.")
+            raise LLMError(self._timeout_msg(spec, timeout))
+
+    @staticmethod
+    def _timeout_msg(spec, timeout):
+        return (
+            f"'{spec['model']}' produced nothing for {timeout}s — on a "
+            "CPU-only machine this usually means the model is too big "
+            "for free RAM (swapping). Try again (the model may be loaded "
+            "now), close RAM-heavy apps, or run this turn on the resident "
+            "small model with /model tiny. Raise performance.llm_timeout "
+            "in config.yaml if the machine genuinely needs longer.")
 
     def supports_tools(self, role):
         """Does this role's model support NATIVE function calling?
@@ -122,6 +194,10 @@ class LLM:
         }
         if tools:
             payload["tools"] = tools
+
+        # (connect, read) split: a server that is DOWN still fails in seconds;
+        # only the wait for bytes from a live server gets the long budget.
+        timeout = (10, timeout)
 
         if not stream:
             r = requests.post(url, json=payload, timeout=timeout)

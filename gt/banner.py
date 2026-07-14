@@ -79,5 +79,5 @@ def render(console, version: str):
             console.print(f"[bold {_GT_PURPLE}]{line}[/]")
     console.print(f"[{_GT_PURPLE}]{_LEFT_PAD}created by [bold]{_AUTHOR}[/bold]"
                   f"[/]   [dim]· build v{version}[/dim]")
-    console.print(f"[dim]{_LEFT_PAD}local coding agent · 3B-first, runs fully "
+    console.print(f"[dim]{_LEFT_PAD}local coding agent · small-model-first, runs fully "
                   f"on your machine[/dim]")

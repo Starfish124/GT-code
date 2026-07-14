@@ -2,7 +2,7 @@
 
 On first run (or `/setup`), GT:
   1. probes the hardware and shows what this machine is capable of,
-  2. recommends the model tier that fits (3B minimum … 14B maximum),
+  2. recommends the model tier that fits (1.5B minimum … 14B maximum),
   3. checks what Ollama already has and offers to `ollama pull` the rest,
   4. saves the chosen line-up to data/setup.json so later launches skip all
      of this and just apply it.
@@ -176,7 +176,7 @@ def ensure(config, llm, console, prompt_fn, force=False):
     if missing:
         total = sum(machine.CATALOG.get(m, {}).get("dl_gb", 0) for m in missing)
         console.print(f"\n{len(missing)} model(s) to download "
-                      f"(~{total:.1f} GB total). The 3B model and the "
+                      f"(~{total:.1f} GB total). The tiny model and the "
                       f"embedding model are the minimum for GT to function.")
         for m in missing:
             info = machine.CATALOG.get(m, {})

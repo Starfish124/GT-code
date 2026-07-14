@@ -8,3 +8,7 @@ downgrades the hex to the nearest colour on terminals that lack truecolour.
 # Grant Thornton brand purple (matches the banner gradient's mid tone).
 PURPLE = "#7B3FB0"
 PURPLE_DIM = "#6A2C91"
+
+# Pygments style for every syntax-highlighted code block GT renders (final
+# answers, write-approval previews). One knob so it all matches.
+CODE_THEME = "one-dark"

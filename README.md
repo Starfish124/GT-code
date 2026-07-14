@@ -2,7 +2,7 @@ GT-Code your own local coding agent! (please scroll lower to see trouble shootin
 
 A small, self-hosted CLI coding assistant, like Claude Code, but running
 **on your machine** with your local models no cloud LLM, no API keys. (no internet usage either) It uses
-3B, 8B and 14B parameter models (input needed for other models).
+a ladder of 1.5B, 8B and 14B parameter models (input needed for other models).
 
 **On the network:** the model itself runs locally (Ollama on localhost) and GT
 sends **no telemetry, analytics, or update checks** — ever. The one way data can
@@ -14,7 +14,7 @@ lesson-learning are all opt-in; file/command access is confined to the folder
 you launch GT in).
 
 On **first launch it evaluates your hardware** (RAM, CPU, GPU/VRAM), tells you
-what this machine can handle, and offers to download the right models — 3B
+what this machine can handle, and offers to download the right models — 1.5B
 minimum, 14B maximum (27B+ is deliberately unsupported: too slow to be a
 useful interactive agent on consumer hardware). It then works like Claude
 Code: **asks clarifying questions**, **presents an architecture plan** before
@@ -23,7 +23,7 @@ Word**), verifies its work, and **asks permission** as it goes — with
 "always allow" grants per action kind, just like Claude Code.
 
 ```
-You type ─► Router (3B picks a model) ─► Brain (qwen3:14b / 8B — never 27B+)
+You type ─► Router (resident 1.5B picks a model) ─► Brain (qwen3:14b / 8B — never 27B+)
                                               │
               clarify (ask_user) ─► plan ─► execute ─► verify
                                               │
@@ -126,7 +126,7 @@ Destructive-looking commands (`rm -rf`, `format`, `del /s`, forced pushes…)
 | `/help` | List commands |
 | `/setup` | Re-run the wizard (re-evaluate hardware, download models) |
 | `/doctor` | Hardware report + model line-up + provider health |
-| `/models` | Show the exact model ids Ollama + LM Studio serve |
+| `/models` | Show the exact model ids Ollama is actually serving |
 | `/model <role\|off>` | Pin a model (`brain`/`fast`/`tiny`) or `off` to auto-route |
 | `/route` | Toggle smart auto-routing |
 | `/think` | Toggle deep-thinking mode (slower, more careful; off by default) |
@@ -187,8 +187,9 @@ files in git.
 Local agents usually feel slow for reasons that have nothing to do with model
 quality. GT attacks all of them:
 
-**The speed ladder.** The 3B routes and handles small talk (instant), the
-**8B is the workhorse** for everyday coding and stays hot in RAM, and the 14B
+**The speed ladder.** The small resident model (1.5B) routes, chats and
+handles everyday coding — one hot model, so nothing reloads between turns —
+the **8B is the escalation workhorse** for substantial builds, and the 14B
 is reserved for what actually needs deep reasoning — architecture, planning,
 complex design. Sending everything to the biggest model is what kills local
 agents: every model swap can cost 10–60 s of loading before the first token.
@@ -198,8 +199,8 @@ of internal reasoning tokens before answering — measured on the same question:
 13 tokens without thinking vs 134 with. GT disables it by default and gives
 you `/think` to turn it back on when you *want* slow-and-careful.
 
-**Models stay loaded.** GT uses Ollama's native API with `keep_alive: 30m`,
-so a model loads once and stays hot. At startup (and whenever you `/model`
+**Models stay loaded.** GT uses Ollama's native API with `keep_alive: 8h`,
+so a model loads once per boot and stays hot. At startup (and whenever you `/model`
 pin), GT pre-warms the model **in the background while you type your first
 prompt**.
 
@@ -209,11 +210,11 @@ outputs are trimmed before re-entering context so later steps don't pay
 ever-growing prompt-processing costs.
 
 **You see where time goes.** While waiting you get a live counter
-(`⠹ waiting for fast (qwen3:8b) — 3.2s`), and after every response a real
-measurement straight from Ollama:
+(`/ fast (qwen3:8b) · reading ~1312-token prompt — 3.2s  · esc interrupts`),
+and after every response a real measurement straight from Ollama:
 
 ```
-⏱ model load 8.2s · prompt 1.1s (1312 tok) · 34 tok/s × 412 tok · total 21.3s
+  time: model load 8.2s · prompt 1.1s (1312 tok) · 34 tok/s x 412 tok · total 21.3s
 ```
 
 If `model load` shows up, that was a one-time cost (model got evicted or
@@ -221,7 +222,7 @@ first use). If `prompt` dominates, the context is big. If tok/s is low, the
 model is too big for the hardware — `/setup` re-evaluates the tier.
 
 Tuning knobs in `config.yaml` under `performance:`: `thinking`, `keep_alive`,
-`num_ctx`.
+`num_ctx`, `llm_timeout`.
 
 ## How it works (the interesting part)
 
@@ -260,7 +261,7 @@ non-interactive instead of hanging on an invisible prompt.
 
 **Routing** (`gt/router.py`). Cheap heuristics first (small talk → `tiny`,
 code signals → `brain`); only ambiguous requests cost a one-word
-classification from the 3B model. Pin with `/model brain`.
+classification from the small resident model (1.5B). Pin with `/model brain`.
 
 **Agent loop** (`gt/agent.py`). A **hybrid tool protocol**: on models whose
 chat template supports it (asked of Ollama once per model), tool calls go
@@ -344,12 +345,19 @@ file it came from.
 ```yaml
 router:
   enabled: true      # auto-pick a model per request
-  default: brain     # fallback when unsure
+  default: tiny      # small-model-first: the resident 1.5B answers everyday
+                     # turns; GT escalates to fast/brain only for real builds
 agent:
   max_steps: 20      # tool iterations before GT must answer
   auto_approve: false
+performance:
+  llm_timeout: 1800  # seconds with NO bytes from Ollama before a turn is
+                     # abandoned — high on purpose: CPU model-load + prefill
+                     # can legitimately run 10+ minutes sending nothing
 memory:
-  auto_learn: true   # extract a lesson after each task
+  auto_learn: false  # OFF by default (corporate/confidentiality): a lesson
+                     # drawn from a client task can bake client details into
+                     # permanent storage — opt in per context
   recall_k: 5        # memories pulled into context per turn
   min_score: 0.28    # similarity floor (0..1)
 compaction:
@@ -361,19 +369,23 @@ subagents:
   max_steps: 8       # tool calls before the sub-agent must report
   max_report_chars: 3000
 hooks:
-  enabled: true      # your commands at lifecycle points (see config.yaml)
+  enabled: false     # OFF by default: hooks run YOUR shell commands, so
+                     # anyone who can edit the config gets code execution —
+                     # enable only with a config you control and trust
   timeout: 30        # per-hook kill timer; failures are fail-open
 intent_gate:
   enabled: true      # weigh a new build request before executing it
   min_confidence: 75 # >= builds now; below plans first and waits for "go"
   ask_below: 45      # < asks one clarifying question instead
 web:
-  enabled: true      # web_search / web_fetch tools; false = fully offline
+  enabled: false     # OFF by default so GT is genuinely local/air-gapped
+                     # out of the box; turn on per task for internet access
 ```
 
 The `models:` section is a default for mid-range machines — the wizard's
 per-machine choice (saved in `data/setup.json`) overrides it at launch.
-LM Studio remains an optional fallback provider if its server is running.
+Ollama is the only provider — the one model server GT runs on; nothing
+else needs to be installed or running.
 
 ---
 
@@ -443,7 +455,8 @@ A dependency-free logic test (no models needed) lives in `tests/`:
 
 It checks config loading, tool-call parsing, the file/office/ask tools,
 hardware tiering, the permission system, web-tool gating, the streaming
-renderer, and the router heuristics. All 42 checks should pass.
+renderer, and the router heuristics. All checks should pass (480+ as of
+v0.7.4).
 
 ---
 
@@ -467,7 +480,7 @@ GT-code/
     office.py          create_excel / create_powerpoint / create_word
     memory.py          sqlite + nomic-embed vector store
     improve.py         self-improving lesson extractor
-    llm.py             OpenAI-compatible client (Ollama + LM Studio)
+    llm.py             native Ollama /api/chat client (keep_alive, timings)
     ui.py              live streaming-markdown renderer
     prompts.py         system prompt (clarify → plan → execute → verify)
     config.py          config loader

@@ -321,6 +321,26 @@ check("preview shows a size line", "200 lines" in _prev)
 check("preview is far smaller than the file it describes", len(_prev) < len(_big))
 check("preview truncates with a +more marker", "+194 more lines" in _prev)
 check("empty content -> empty-file note", _file_preview("") == "(empty file)")
+from rich.console import Group as _RGroup
+check("preview with a path is syntax-highlighted (a renderable, not str)",
+      isinstance(_file_preview("print('hi')\n", path="app.py"), _RGroup))
+check("preview without a path stays a plain string (old callers unchanged)",
+      isinstance(_file_preview("print('hi')\n"), str))
+import io as _fio
+_fpc = Console(file=_fio.StringIO(), force_terminal=False, width=100)
+_fperm = __import__("gt.permissions", fromlist=["Permissions"]).Permissions(
+    _fpc, lambda _: "n", Path(__file__).resolve().parent / "_perms_r.json")
+_fperm.approve("Write app.py", _file_preview("print('hi')\n", path="app.py"),
+               key="files")
+check("permission panel renders a rich preview without crashing",
+      "print" in _fpc.file.getvalue())
+(Path(__file__).resolve().parent / "_perms_r.json").unlink(missing_ok=True)
+
+print("\nllm timeout is config-driven (live: a 790s CPU prefill died at 600s)")
+check("performance.llm_timeout default is 30 min",
+      int(cfg.performance.get("llm_timeout", 0)) == 1800)
+from gt.theme import CODE_THEME as _ct
+check("one shared code theme for all highlighted output", bool(_ct))
 
 print("\nrun_command: cwd / timeout / background")
 import sys as _sys
@@ -907,6 +927,43 @@ check("'can you use the internet?' is conversation",
       _tagent._is_conversational("can you use the internet?"))
 check("a real build phrased as a question is still work",
       not _tagent._is_conversational("can you build me a todo app?"))
+
+print("\nwork floor: tool turns never run on the tiny model (tiny talks, fast codes)")
+class _FloorRouter:
+    prefer_fast = False
+    def route(self, _msg): return "tiny"
+    def _cap(self, role): return role
+_wagent = Agent(llm=_StubLLM(), config=cfg, memory=_Stub(), router=_FloorRouter(),
+                console=_quiet, improver=_Stub(),
+                approve=lambda *a, **k: True, ask=None)
+_wr, _, _, _wpm = _wagent._resolve_turn("write a file hello.py that prints hi")
+check("a tool-shaped request escalates tiny -> fast (1.5B measured 0/3 agentic)",
+      _wr == "fast" and _wpm == "work")
+_wr2, _, _, _wpm2 = _wagent._resolve_turn("hey how are you")
+check("small talk stays on the always-hot tiny", _wr2 == "tiny" and _wpm2 == "chat")
+_wr3, _, _, _ = _wagent._resolve_turn("lets try it again")
+check("a contentless conversational follow-up stays tiny (no pointless 8B load)",
+      _wr3 == "tiny")
+cfg.router["work_min_role"] = "tiny"
+_wr4, _, _, _ = _wagent._resolve_turn("write a file hello.py that prints hi")
+check("work_min_role: tiny restores the old behaviour", _wr4 == "tiny")
+cfg.router["work_min_role"] = "fast"
+
+print("\nllm timeout parsing + stall classification (the 790s prefill death)")
+from gt.llm import _parse_seconds, _looks_like_read_timeout
+check("plain int passes through", _parse_seconds(1800, 99) == 1800)
+check("keep_alive-style '30m' is 1800s, not a crash", _parse_seconds("30m", 99) == 1800)
+check("'2h' parses", _parse_seconds("2h", 99) == 7200)
+check("'900s' parses", _parse_seconds("900s", 99) == 900)
+check("empty/None falls back to the default", _parse_seconds(None, 99) == 99)
+check("garbage falls back to the default", _parse_seconds("soon", 99) == 99)
+import requests as _rq
+from urllib3.exceptions import ReadTimeoutError as _RTE
+_wrapped = _rq.exceptions.ConnectionError(_RTE(None, "http://x", "Read timed out."))
+check("a mid-stream stall wrapped as ConnectionError is recognised as a timeout",
+      _looks_like_read_timeout(_wrapped))
+check("a genuine refused connection is NOT a timeout",
+      not _looks_like_read_timeout(_rq.exceptions.ConnectionError("refused")))
 # the transcript's two misrouted capability questions (they spawned a research
 # sub-agent + hit poisoned recall instead of answering directly)
 check("'can you deploy agents?' is a capability question (conversation)",
@@ -2529,7 +2586,8 @@ _banner.render(_bc, "9.9.9")
 _bout = _bc.file.getvalue()
 check("banner names the author", "Sarvesh Singh" in _bout)
 check("banner shows the build version", "9.9.9" in _bout)
-check("banner says 3B-first", "3B-first" in _bout)
+check("banner says small-model-first (the 3B-first claim went stale at the "
+      "1.5B lineup)", "small-model-first" in _bout and "3B-first" not in _bout)
 _orig_supports = _banner._supports_block
 _banner._supports_block = lambda c: False        # force the legacy-terminal path
 _fc = Console(file=io.StringIO(), force_terminal=False)

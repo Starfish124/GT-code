@@ -984,7 +984,8 @@ class Agent:
         capped back to the resident 3B on a slow box (and 'tiny' if absent)."""
         if preferred not in self.config.models:
             preferred = "tiny"
-        return self.router._cap(preferred)
+        cap = getattr(self.router, "_cap", None)
+        return cap(preferred) if cap else preferred
 
     def _resolve_turn(self, user_msg):
         """(role, conversational, chat_only, prompt_mode) for this turn.
@@ -1024,6 +1025,17 @@ class Agent:
         role = self.force_role or self.router.route(user_msg)
         conversational = self._is_conversational(user_msg)
         chat_only = self._chat_only(user_msg)
+        # Tool-calling belongs on the workhorse. The 1.5B tiny is a fine
+        # router/chat model but measured 0/3 on agentic probes — it answers a
+        # work request with prose + a code fence instead of calling write_file.
+        # A REAL work turn (not chat, not conversational) therefore runs on at
+        # least `fast` (the original speed-ladder design: tiny routes and
+        # talks, fast codes). Questions and small talk still answer on the
+        # always-hot tiny; router.work_min_role: tiny restores old behaviour.
+        if not chat_only and not conversational and not self.force_role:
+            floor = self.config.router.get("work_min_role", "fast")
+            if self._ROLE_RANK.get(role, 0) < self._ROLE_RANK.get(floor, 0):
+                role = self._forced_role(floor)
         # Mid-task continuity (observed live: the 8B built flappy bird, then
         # 'start the game' and 'its blank just a white page' dropped to the
         # 3B at chat temperature): while the task is live, a follow-up IS

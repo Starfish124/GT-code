@@ -23,21 +23,37 @@ _USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                "(KHTML, like Gecko) Chrome/122.0 Safari/537.36")
 
 
-def _file_preview(content: str, head_lines: int = 6) -> str:
+def _file_preview(content: str, head_lines: int = 6, path=None):
     """A tight summary for the write-permission prompt — never the whole file.
 
     Dumping a 4000-char HTML file into the approval box buries the one thing
     the user is deciding on (which file, how big) under a wall of code. Show
-    the size and just the first few lines instead.
+    the size and just the first few lines instead — syntax-highlighted when
+    the file type is recognisable from `path`, plain text otherwise.
     """
     if not content.strip():
         return "(empty file)"
     lines = content.splitlines()
     size = f"{len(lines)} line{'s' if len(lines) != 1 else ''}, {len(content)} chars"
     head = "\n".join(lines[:head_lines])
-    if len(lines) > head_lines:
-        head += f"\n… (+{len(lines) - head_lines} more lines)"
-    return f"{size}\n{head}"
+    more = (f"… (+{len(lines) - head_lines} more lines)"
+            if len(lines) > head_lines else "")
+    if path is not None:
+        try:
+            from rich.console import Group
+            from rich.syntax import Syntax
+            from rich.text import Text
+            from .theme import CODE_THEME
+            lexer = Syntax.guess_lexer(str(path), code=content)
+            parts = [Text(size, style="dim"),
+                     Syntax(head, lexer, theme=CODE_THEME, word_wrap=True,
+                            background_color="default")]
+            if more:
+                parts.append(Text(more, style="dim"))
+            return Group(*parts)
+        except Exception:
+            pass                    # unknown type/old rich — plain preview
+    return f"{size}\n{head}" + (f"\n{more}" if more else "")
 
 
 # --------------------------------------------------------------------------- #
@@ -88,7 +104,7 @@ class WriteFile(Tool):
         p = ctx.resolve(args["path"])
         content = args.get("content", "")
         outside = ctx.confine_enabled() and ctx.outside_workspace(p)
-        if not ctx.approve(f"Write {p}", _file_preview(content),
+        if not ctx.approve(f"Write {p}", _file_preview(content, path=p),
                            key="files", force=outside):
             return ("DENIED: writing outside the workspace was declined."
                     if outside else "DENIED: user declined the write.")

@@ -3,7 +3,7 @@
 # ----------------------------------------------------------------------------
 #  Roles (brain, fast, tiny, reviewer, embed) map to local models. You rarely
 #  need to edit this: the FIRST-LAUNCH WIZARD evaluates the machine's hardware
-#  and picks the biggest tier that runs well (3B minimum, 14B maximum — 27B+
+#  and picks the biggest tier that runs well (1.5B minimum, 14B maximum — 27B+
 #  is deliberately unsupported: too slow for interactive coding). Its choice
 #  is saved to data/setup.json and applied on every launch; re-evaluate with
 #  /setup, inspect with /doctor, and check served ids with /models.
@@ -62,6 +62,11 @@ router:
   escalate_len: 160     # only requests longer than this spend a classifier word
                         # deciding whether to escalate off the resident model; short turns
                         # answer straight on the resident model (instant).
+  work_min_role: fast   # the smallest model allowed to RUN TOOLS. The 1.5B is a
+                        # great router/chat model but drops tool calls as prose,
+                        # so real work turns run on at least the 8B; questions
+                        # and chat still answer on the always-hot tiny. Set to
+                        # tiny to let the resident model attempt tool work.
   prefer_fast_on_slow: true  # on a CPU-only machine (no GPU) a 14B crawls at a
                              # couple tok/s, so route 'brain' work to the 8B
                              # instead. Auto-detected at startup. /model brain
@@ -85,10 +90,15 @@ performance:
   thinking: false       # Qwen3 hidden reasoning mode. OFF = much faster responses;
                         # toggle per-session with /think when you want deep thought.
   keep_alive: 8h        # keep models hot in RAM. Long on purpose: the one-time
-                        # cold load of the 3B (~30s on a CPU box) is then paid
+                        # cold load of the tiny model (~30s on a CPU box) is then paid
                         # ONCE per boot — every later `gt` launch that day finds
                         # it already resident and answers instantly.
   num_ctx: 8192         # context window; bigger = slower prompt processing
+  llm_timeout: 1800     # seconds with NO bytes from Ollama before a turn is
+                        # abandoned. High on purpose: CPU model-load + prefill
+                        # can legitimately run 10+ minutes sending nothing
+                        # (a live 790s prefill died at the old 600s). Bail out
+                        # early with esc, not a network timeout.
   # Sampling temperature T reshapes the softmax over token logits:
   #   p_i = exp(z_i / T) / sum_j exp(z_j / T)
   # Low T = sharp/deterministic (good for code & tool-call JSON); high T =

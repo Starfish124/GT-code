@@ -28,8 +28,9 @@ models:
 
 router:
   enabled: true
-  default: tiny         # 3B-first: resident 3B for everyday turns, escalate
-  escalate_len: 160     # only for real builds. See config.yaml for the details.
+  default: tiny         # small-model-first: resident tiny for everyday turns,
+  escalate_len: 160     # escalate only for real work. See config.yaml.
+  work_min_role: fast   # smallest model allowed to run tools (tiny talks, fast codes)
 
 agent:
   max_steps: 20
@@ -40,6 +41,7 @@ performance:
   thinking: false
   keep_alive: 8h        # keep the model hot: cold load paid once per boot
   num_ctx: 8192
+  llm_timeout: 1800     # no-bytes budget; CPU load+prefill can run 10+ min
 
 memory:
   auto_learn: false     # OFF: don't persist task-derived "lessons" (may capture

@@ -23,6 +23,7 @@ from rich.markdown import Markdown
 from rich.text import Text
 
 from .interrupt import esc_interrupts
+from .theme import CODE_THEME
 
 
 class _Buffer:
@@ -112,6 +113,6 @@ def streaming_markdown(console, refresh_per_second: int = 10,
         if buf.text.strip():
             summary = collapse(buf.text) if collapse else None
             if summary is None:
-                console.print(Markdown(buf.text))
+                console.print(Markdown(buf.text, code_theme=CODE_THEME))
             elif summary:
                 console.print(Text(summary, style="dim"))
