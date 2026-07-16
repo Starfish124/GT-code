@@ -1,32 +1,38 @@
 ---
 name: word-docs
-triggers: word, docx, document, report, memo, letter, proposal, writeup
+triggers: word, docx, memo, letter, proposal, report
 priority: 4
 ---
-# Word-document playbook — reports that read like a consultant wrote them
+# Word-document playbook
 
-Use the create_word tool (blocks: heading / paragraph / bullets).
+## Grounding — do this first, every time
+- Every number, name, date and total must come from a file you called
+  read_file on THIS turn. If you did not read it, do not write it.
+- The request names a file? Call read_file on it BEFORE create_word.
+  Never guess column names, categories or figures.
+- A figure not in the source: write "not available in the source data".
+  Never estimate, never invent a total.
+- Never say the document is "ready to share". Say what you read and
+  what you left out.
 
-## Structure (default for any report/memo)
-1. Title (heading level 1) — specific, dated if relevant.
-2. **Executive summary** — 3-5 sentences: the situation, the finding, the
-   recommendation. A busy reader stops here and still knows everything.
-3. Body sections with level-2 headings, one topic each, in an order that
-   builds the argument. Level-3 only inside long sections.
-4. Recommendations / next steps — numbered, each starting with a verb,
-   each with an owner or timeframe when known.
+## The tool — create_word, nothing else
+- Block types are ONLY: heading (text, integer level 1-9), paragraph
+  (text), bullets (items). Any other type is silently discarded — a
+  "numbered" or "table" block writes an EMPTY paragraph and loses its
+  content.
+- Need a numbered list or a table? Use bullets, and say so in your
+  final answer.
+- Plain text only. `**bold**` prints literal asterisks in Word.
+- NEVER run_command, NEVER pip, NEVER python3, NEVER pandas. If
+  create_word cannot do it, deliver what it can and say so.
 
-## Writing style
-- Short sentences, active voice, concrete numbers over vague claims.
-- Paragraphs of 3-5 sentences; switch to bullets for parallel facts,
-  criteria or options — not for narrative.
-- Bold sparingly for the few phrases that must be scannable.
-- Define an acronym once, then use it.
-- No filler ("it should be noted that", "in order to") — every sentence
-  earns its place.
+## Structure (report/memo default)
+1. Title — heading level 1, specific.
+2. Executive summary — 3-5 sentences: situation, finding, recommendation.
+3. Body — level-2 headings, one topic each.
+4. Recommendations — bullets, each starting with a verb.
 
-## Judgment
-- Match length to purpose: memo 1 page, findings report 2-5, proposal
-  as long as the decision needs — never longer.
-- If source material was provided, ground every claim in it; flag gaps
-  explicitly rather than papering over them.
+## Style
+- Short sentences, active voice. Concrete numbers over vague claims —
+  but only numbers you read this turn.
+- Bullets for parallel facts; paragraphs for narrative. No filler.

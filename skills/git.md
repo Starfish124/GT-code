@@ -1,61 +1,31 @@
 ---
 name: git
-triggers: git, commit, commits, branch, merge, rebase, pull request, version control, gitignore, staging, checkout, git init, repo, repository
+triggers: git, commit, commits, rebase, pull request, version control, gitignore, git init
 priority: 2
 ---
-# Git playbook — a clean, readable history
+# Git — a commit is a permanent record you must defend
 
-The bar: someone reads `git log` and understands what changed and why.
+RULE 1 — NEVER describe a change you have not read. Run `git diff` THIS turn
+before writing any commit message. If the diff showed you no reason, the body
+states WHAT changed and stops. Never write a cause ("failed on flaky
+networks", "users reported") you did not read in the diff or the user's
+message. History cannot be edited.
 
-## Before touching history, look
-- `git status` and `git diff` first — know what's staged, unstaged, and
-  untracked before you commit. Never `git add -A` blind; you'll commit junk
-  (node_modules, .env, build output, secrets).
-- `git log --oneline -10` to match the project's existing commit style
-  (tense, prefixes) before writing your own.
+RULE 2 — Stage files BY NAME: `git add path/a path/b`. Not `-A`, not `.` —
+those sweep in .env, secrets, build output, node_modules. A secret in a commit
+is in history forever: rotate it; deleting the file later does NOT scrub it.
 
-## Starting a repo
-- `git init`, then create a `.gitignore` BEFORE the first commit so garbage
-  never enters history. Language essentials:
-  - Python: `__pycache__/`, `*.pyc`, `.venv/`, `venv/`, `.env`, `*.egg-info/`,
-    `.pytest_cache/`, `dist/`, `build/`
-  - Node: `node_modules/`, `dist/`, `build/`, `.env*`, `*.log`, `.DS_Store`
-  - Always: `.env`, secrets, credentials, large data files, `.DS_Store`.
-- First commit small and working ("Initial commit: project scaffold"), not a
-  half-built dump.
+RULE 3 — `git push --force`, `git push -f`, `git reset --hard`, `git clean -fd`
+destroy work and MOST ARE NOT BLOCKED — no prompt will save you. Undo instead:
+`git revert <sha>` (anything pushed), `git reset --soft HEAD~1` (last commit),
+`git restore --staged <file>`. Never force-push or rebase a shared branch.
 
-## Commit messages that earn their place
-- Subject line: imperative mood, ≤ ~60 chars, no trailing period.
-  "Add rate limiting to login" — NOT "added stuff" / "fixes" / "wip".
-- Explain WHY in the body (wrap ~72 cols) when the change isn't obvious; the
-  diff already shows the what.
-- One logical change per commit — a bug fix and a refactor are two commits.
-  A reviewer should be able to revert one without losing the other.
-```
-Add retry to the S3 upload path
-
-Uploads failed intermittently on flaky networks; a 3x backoff
-retry makes the daily sync reliable without masking real errors.
-```
-
-## Branching & merging
-- Work on a feature branch, never commit straight to `main` for anything
-  non-trivial: `git switch -c feat/thing` (or `git checkout -b`).
-- Keep branches short-lived and focused. Rebase your own unpushed work to
-  tidy it (`git rebase main`); never rebase or force-push shared branches
-  others may have pulled.
-- Resolve conflicts by reading BOTH sides and understanding intent — don't
-  blindly accept one. After resolving, run the tests before committing.
-
-## Safety — these prompt in red, and should
-- `git push --force`, `git reset --hard`, `git clean -fd` destroy work. Prefer
-  `--force-with-lease` over `--force`; prefer `git revert` (a new undo commit)
-  over `reset --hard` on anything shared.
-- To undo the last commit but keep the changes: `git reset --soft HEAD~1`.
-  To unstage without losing edits: `git restore --staged <file>`.
-- Never commit secrets. If one slips in, it's in history — rotate the secret;
-  removing the file in a later commit does NOT scrub it.
-
-## Verify
-- After committing: `git log --oneline -3` and `git status` (clean tree). The
-  history should read as a sequence of small, sensible, working steps.
+## Committing
+There is no git tool. Every git action goes through `run_command`.
+- Multi-line: `git commit -m "<subject>" -m "<body>"` — two -m flags become two
+  paragraphs. Never put \n inside -m. Never run bare `git commit`: it opens an
+  editor with no stdin and hangs.
+- Subject: imperative, <=60 chars, no period. "Add rate limiting to login".
+- One change per commit. Work on a branch: `git switch -c feat/thing`.
+- Then run `git log --oneline -3` and `git status` and READ the output.
+  Emitting the call is not proof it ran. If the tree is dirty, say so.

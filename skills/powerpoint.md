@@ -3,34 +3,32 @@ name: powerpoint
 triggers: powerpoint, pptx, slides, deck, presentation, pitch, slideshow
 priority: 5
 ---
-# PowerPoint playbook — decks with a storyline, not bullet dumps
+# PowerPoint playbook — decks a client can be shown
 
-Use the create_powerpoint tool. A good deck reads as an argument: situation →
-insight → evidence → so-what → next steps.
+## Never invent slide content
+- Every number, name and date on a slide must come from a file you called
+  read_file on THIS TURN. No source file? Say so and ask — never invent
+  illustrative figures. A fabricated deck gets presented to a client.
+- Summarizing a document? read_file it FIRST, then extract its argument.
+
+## Use the native tool
+- Call create_powerpoint. No install, no pandas.
+- slides = [{"title": "...", "bullets": ["...", ...], "notes": "..."}].
+  Bullets are PLAIN STRINGS, never dicts.
+- It CANNOT draw charts, images or tables. Asked for a chart? Put the real
+  numbers in bullets and tell the user the deck has no chart. Never pip
+  install, never shell out, never reach for matplotlib.
 
 ## Structure
-- Title slide: sharp title + subtitle with context (team/date/purpose).
-- 2nd slide: agenda or the executive summary of the whole story (for
-  decision decks, lead with the answer).
+A deck is an argument: situation → insight → evidence → so-what → next steps.
+- Title slide, then an executive summary that leads with the answer.
 - Body: ONE idea per slide. If a slide needs "and", split it.
-- Last slide: concrete next steps or decision asked — never just "Thanks".
+- Last slide: next steps or the decision asked — never "Thanks".
+- One slide per real finding. Never add a slide to hit a number.
 
-## Slide titles carry the message
-- Title = the takeaway, not the topic. "Cloud costs doubled in Q3" beats
-  "Cost overview". Someone reading only titles should get the full story.
-
-## Bullets
-- Max 5 per slide, max ~12 words each. Fragments, not sentences.
-- Parallel grammar (all start with a verb, or all with a noun).
-- Numbers beat adjectives: "−23% churn" not "much lower churn".
-
-## Speaker notes
-- Every content slide gets notes: 2-4 sentences of what the presenter
-  actually says — the detail, caveats and sources that DON'T go on the
-  slide. This is where the depth lives.
-
-## Length judgment
-- Status update: 5-7 slides. Proposal/pitch: 8-12. Never pad; a 6-slide
-  deck that lands is better than 15 that wander.
-- Summarizing a document? Extract its argument, don't transplant its
-  paragraphs onto slides.
+## Slides
+- Title = the takeaway: "Cloud costs doubled in Q3" beats "Cost overview" —
+  but only if you read that. Can't trace it? Use the plain topic title.
+- Bullets: max 5 per slide, ~12 words, fragments, parallel grammar.
+- Notes per slide: what the presenter says — detail, caveats, and the file
+  path the numbers came from.

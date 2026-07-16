@@ -3,50 +3,33 @@ name: backend
 triggers: backend, api, rest, server, endpoint, database, fastapi, flask, express, node, sql, auth, crud
 priority: 4
 ---
-# Backend playbook — APIs that survive contact with real clients
+# Backend playbook
 
-## Project shape (any language)
-- Layers: routes/handlers → services (logic) → data access. Handlers stay
-  thin; logic lives where tests can reach it without HTTP.
-- Config from environment variables with sane defaults; never hardcode
-  secrets, ports, or connection strings. Ship a .env.example.
-- Python default: FastAPI + uvicorn (typed, validated, self-documenting).
-  Node default: Express + a validation lib.
+NEVER say an API is running, live, hosted, working or ready unless a request
+you made THIS TURN came back with a real response. No response = say plainly
+that you could not verify it. Never describe an endpoint you never called.
 
-## REST conventions
-- Nouns for resources: GET /invoices, POST /invoices, GET /invoices/{id},
-  PATCH to update, DELETE to remove. Verbs only for true actions
-  (/invoices/{id}/send).
-- Status codes: 200/201/204 success; 400 bad input; 401 unauthenticated;
-  403 forbidden; 404 missing; 409 conflict; 500 = a bug on our side.
-- ONE error shape everywhere: `{"error": {"code": "...", "message": "..."}}`.
-- Paginate every list endpoint (limit/offset), cap limit.
+## Start it, then prove it
+- Pick the port yourself (8000). Never ask the user.
+- Start the server with run_command "background": true, then check_process for
+  "listening on". Foreground = guaranteed timeout.
+- Then curl it, every time:
+  run_command: curl -s http://localhost:8000/health
+  Only once you SEE the response body may you say it works. Curl one real
+  endpoint too. stop_process when done.
 
-## Boundaries
-- Validate ALL input at the edge (pydantic / schema lib) — types, ranges,
-  lengths. Reject unknown fields on write endpoints.
-- SQL only with parameterized queries — string-built SQL is an instant
-  bug and an injection hole.
-- Hash passwords with bcrypt/argon2; never log secrets, tokens, or
-  full request bodies containing personal data.
+## Python — zero installs
+fastapi, uvicorn and flask are NOT installed. Do NOT pip install them, do NOT
+run brew, do NOT run `python3 -m venv` (its pip is missing here) — that burns
+the whole turn. Never call `python3`.
+write_file a real .py file using the stdlib http.server + json, then:
+run_command: "/Users/sarveshsingh/GT-code/.venv/bin/python api.py"
+Persist to sqlite3 or a JSON file (stdlib). Never a cloud DB — Firebase and
+Atlas need accounts you lack. Node: Express is fine, npm works.
 
-## Running & hosting it
-- Pick the port yourself (8000 Python / 3000 Node, or the framework
-  default) — never ask the user.
-- venv activation does NOT persist between commands: call the venv's
-  binaries directly (venv/bin/pip install …, venv/bin/uvicorn …;
-  venv\Scripts\... on Windows). Or skip the venv for tiny demos.
-- A server never exits: start it with "background": true, wait, then
-  check_process for "listening on ...". Foreground = guaranteed timeout.
-- Verify with a real request (`curl http://localhost:<port>/health` or an
-  actual endpoint) before declaring it hosted. Stop it with stop_process
-  when done unless the user wants it left running.
-- Default to local + SQLite/JSON for demos; cloud DBs (Firebase, Atlas)
-  need accounts/keys — only when the user explicitly has them.
-
-## Reliability
-- Timeouts on every outbound call; catch specific exceptions, return the
-  standard error shape, log with context (request id, not stack spam).
-- Health endpoint (GET /health) that checks the DB.
-- Write at least: one happy-path test per endpoint + one validation-
-  failure test. Run them before declaring the API done.
+## Shape
+- routes -> service logic -> data access.
+- Validate every input at the edge; reject bad types/ranges with 400.
+- One error shape: {"error": {"code": "...", "message": "..."}}
+- Parameterized SQL only — never string-built. bcrypt for passwords.
+- Add GET /health. Never log secrets or personal data.

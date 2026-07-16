@@ -224,7 +224,7 @@ def digest_line(name, args, result):
             break
     # Mark failures loudly — follow-up turns must not gloss over them and
     # claim the work succeeded.
-    failed = (first.startswith(("ERROR", "DENIED", "REFUSED"))
+    failed = (first.startswith(("ERROR", "DENIED", "REFUSED", "BLOCKED"))
               or bool(re.match(r"exit code: (?!0\b)", first)))
     return f"- {'FAILED ' if failed else ''}{name}({arg}) -> {first}"
 
@@ -244,6 +244,32 @@ _INTENT = re.compile(
 # getting the carry-out-the-plan push (see _resolve_turn).
 _DEFER = re.compile(r"(?i)\b(later|not (?:now|yet|today)|maybe|hold (?:off|on)|"
                     r"wait|skip|nah|never ?mind|don'?t|forget it)\b")
+
+# --- Anti-fabrication interlock ------------------------------------------- #
+# A document tool (create_excel/word/powerpoint) must not build a client
+# deliverable ABOUT a source file the model never actually opened this turn
+# (proven live: create_excel called as step 1, inventing every department,
+# currency and total, then "ready to share with the client!"). _SOURCE finds
+# the data files a request NAMES; existence on disk is the discriminator, so a
+# template/from-scratch request — which names none — is never gated.
+_SOURCE = re.compile(
+    r"[\w./~\\-]+\.(?:csv|tsv|xls|xlsx|xlsm|json|parquet|txt|log|xml|yaml|yml"
+    r"|tab)\b", re.I)
+# The three tools whose output is a deliverable synthesised FROM a source.
+_DOC_TOOLS = {"create_excel", "create_word", "create_powerpoint"}
+# read_file returns raw zip/byte mojibake for these, not data — reading one is
+# NOT grounding, so it is excluded from read-provenance (grounding must then
+# come from a script that parses it: the data playbook's blessed path).
+_BINARY_SOURCE = {".xls", ".xlsx", ".xlsm", ".parquet"}
+# A script the model can author to read a source (write_file then run_command).
+_SCRIPT_EXT = {".py", ".js", ".ts", ".mjs", ".sh", ".rb"}
+
+
+def _token_re(name):
+    """Match a filename as a delimited token in a command string — `client.csv`
+    in `cat /data/client.csv` matches, but not inside `myclient.csv`."""
+    return re.compile(r"(?<![\w.\-])" + re.escape(name) + r"(?![\w\-])")
+
 
 # What to feed back for each kind of stall, instead of ending the turn.
 _NUDGE = {
@@ -1332,6 +1358,21 @@ class Agent:
                       f"approves with 'go', and the next turn builds.")
             self._show_step(name, args, result)
             return result
+        # Anti-fabrication interlock: a document tool may not build a client
+        # deliverable ABOUT a named source file the model never read this turn
+        # (proven live: create_excel called as step 1, inventing every
+        # department, currency and total). The refusal is prefixed 'BLOCKED:'
+        # — NOT 'DENIED' — on purpose: line ~674 records only ERROR/DENIED into
+        # the failed_calls / tool_errors rails, so after the model reads the
+        # file its IDENTICAL retry runs through instead of hitting the
+        # loop-breaker. The gate is idempotent (an ungrounded retry re-blocks,
+        # bounded by max_steps), and it teaches the recovery so the model acts
+        # instead of flailing (the FAILURE-2/4 lesson).
+        if name in _DOC_TOOLS:
+            blocked = self._ungrounded_source(name, args, ctx)
+            if blocked:
+                self._show_step(name, args, blocked)
+                return blocked
         # pre_tool hooks run FIRST — a standing user rule (exit code 2) vetoes
         # the call before it happens, no matter what the model decided.
         allowed, why = self.hooks.pre_tool(name, args, cwd=self.cwd)
@@ -1345,6 +1386,9 @@ class Agent:
             result = tool.run(args, ctx)
         except Exception as e:
             result = f"ERROR running {name}: {e}"
+        # Record provenance BEFORE post_tool decoration, so grounding is judged
+        # on the tool's OWN output (feeds the anti-fabrication interlock above).
+        self._record_provenance(name, args, result, ctx)
         # post_tool hooks can append to what the model sees (lint output,
         # a reminder, a build status) — deterministic feedback, every time.
         extra = self.hooks.post_tool(name, args, result, cwd=self.cwd)
@@ -1352,6 +1396,115 @@ class Agent:
             result = f"{result}\n[post_tool hook output]\n{extra}"
         self._show_step(name, args, result)
         return result
+
+    # ---- anti-fabrication interlock -----------------------------------------
+
+    def _named_sources(self, ctx, out_path=None):
+        """Resolved paths of the real, on-disk data files this turn's message
+        NAMED — the sources a document tool would be building FROM.
+
+        Existence is the discriminator: an invented or purely rhetorical
+        filename, or the tool's own not-yet-written output, is not a source.
+        Returns a set of resolved absolute-path strings."""
+        out = None
+        if out_path:
+            try:
+                out = str(ctx.resolve(out_path).resolve())
+            except Exception:
+                out = None
+        found = set()
+        for tok in _SOURCE.findall(ctx.user_msg or ""):
+            try:
+                p = ctx.resolve(tok).resolve()
+            except Exception:
+                continue
+            rp = str(p)
+            if rp == out:
+                continue
+            if p.exists() and p.is_file():
+                found.add(rp)
+        return found
+
+    def _ungrounded_source(self, name, args, ctx):
+        """A 'BLOCKED:' refusal string if this document call names a real
+        source it has not read this turn — else None (allow the call).
+
+        Grounding is the per-turn ledger _record_provenance keeps in ctx.state:
+        a source is grounded once it was read_file'd in full, named in a
+        run_command, or read by a script the model authored this turn."""
+        named = self._named_sources(ctx, out_path=args.get("path"))
+        if not named:
+            return None                  # template / from-scratch — always allowed
+        grounded = ctx.state.get("grounded", set())
+        partial = ctx.state.get("grounded_partial", set())
+        missing = [f for f in named if f not in grounded]
+        if not missing:
+            return None
+        files = ", ".join(sorted(Path(f).name for f in missing))
+        if all(f in partial for f in missing):
+            return (f"BLOCKED: your only read of {files} was truncated at 20000 "
+                    f"chars, so a summary now would present PART of the file as "
+                    f"the whole — a materially wrong client deliverable. Compute "
+                    f"the aggregates over the FULL file: write_file a short .py "
+                    f"using the stdlib csv module, run it with run_command, then "
+                    f"pass the printed rows to {name}. Do not build from the "
+                    f"truncated view.")
+        return (f"BLOCKED: your request names {files} but you have NOT read it "
+                f"this turn — building this now would invent its numbers, "
+                f"columns and categories (the exact failure this rail stops). "
+                f"First call read_file on {files} (or run a script that prints "
+                f"its real rows), THEN make this same {name} call again — once "
+                f"the file is read, the identical call is allowed straight "
+                f"through. This is not a repeat-failure; it is the one required "
+                f"step before it.")
+
+    def _record_provenance(self, name, args, result, ctx):
+        """Ledger — in ctx.state, per-turn — of which named sources were
+        genuinely opened this turn. This is the evidence _ungrounded_source
+        checks. Only the SUCCESS path of a grounding-relevant tool records."""
+        first = next((l.strip() for l in (result or "").splitlines()
+                      if l.strip()), "")
+        if first.startswith(("ERROR", "DENIED", "REFUSED", "BLOCKED")):
+            return
+        if name == "read_file":
+            try:
+                p = ctx.resolve(args.get("path", "")).resolve()
+            except Exception:
+                return
+            if p.suffix.lower() in _BINARY_SOURCE:
+                return               # zip-byte mojibake grounds nothing
+            rp = str(p)
+            if "[truncated at 20000 chars]" in result:
+                ctx.state.setdefault("grounded_partial", set()).add(rp)
+            else:
+                ctx.state.setdefault("grounded", set()).add(rp)
+        elif name == "write_file":
+            try:
+                p = ctx.resolve(args.get("path", "")).resolve()
+            except Exception:
+                return
+            if p.suffix.lower() in _SCRIPT_EXT:
+                ctx.state.setdefault("scripts", {})[str(p)] = \
+                    args.get("content") or ""
+        elif name == "run_command":
+            # Only an exit-0 command that actually printed output can ground —
+            # and only the specific source it NAMES (or that a script it ran
+            # references), never 'any exit-0 command' as blanket proof.
+            if not first.startswith("exit code: 0") or "stdout:" not in result:
+                return
+            command = str(args.get("command", ""))
+            grounded = ctx.state.setdefault("grounded", set())
+            scripts = ctx.state.get("scripts", {})
+            for src in self._named_sources(ctx):
+                base = Path(src).name
+                if _token_re(base).search(command):
+                    grounded.add(src)
+                    continue
+                for spath, content in scripts.items():
+                    if (_token_re(Path(spath).name).search(command)
+                            and base in (content or "")):
+                        grounded.add(src)
+                        break
 
     # What each tool acted on, for the one-line step header (path, cmd, …).
     _STEP_TARGET = ("path", "command", "query", "url", "task", "id", "question")

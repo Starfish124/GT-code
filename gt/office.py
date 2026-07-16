@@ -34,14 +34,77 @@ def _rows_of(sheet: dict) -> list:
     return ([headers] + list(rows)) if headers else list(rows)
 
 
+def _col_index(ident, headers):
+    """Resolve a chart column identifier — a header NAME, a column letter, or a
+    1-based index — to a 1-based column number, or None if it can't be placed."""
+    if isinstance(ident, bool):          # bool is an int subclass; reject it
+        return None
+    if isinstance(ident, int):
+        return ident if ident >= 1 else None
+    s = str(ident or "").strip()
+    if not s:
+        return None
+    low = [str(h).strip().lower() for h in (headers or [])]
+    if s.lower() in low:                 # header-name match (what a model writes)
+        return low.index(s.lower()) + 1
+    if s.isdigit():
+        return int(s) or None
+    if s.isalpha() and len(s) <= 3:      # a column letter like "B"
+        try:
+            from openpyxl.utils import column_index_from_string
+            return column_index_from_string(s.upper())
+        except Exception:
+            return None
+    return None
+
+
+def _add_chart(ws, spec, headers):
+    """Add one native chart to a worksheet from an optional {"chart": ...} spec.
+
+    Kept forgiving and non-fatal: a malformed spec is skipped, never allowed to
+    lose the data workbook the model actually needed. Columns are named by their
+    header text (categories = the label column, values = one or more numeric
+    columns), which is what a small model can produce from what it just read."""
+    from openpyxl.chart import BarChart, LineChart, PieChart, Reference
+    if not isinstance(spec, dict):
+        return
+    kinds = {"bar": BarChart, "line": LineChart, "pie": PieChart}
+    chart = kinds.get(str(spec.get("type", "bar")).lower(), BarChart)()
+    if spec.get("title"):
+        chart.title = str(spec["title"])
+    has_header = bool(headers)
+    first_data = 2 if has_header else 1
+    if ws.max_row < first_data:
+        return
+    val_ids = spec.get("values")
+    val_ids = val_ids if isinstance(val_ids, list) else [val_ids]
+    val_cols = [c for c in (_col_index(v, headers) for v in val_ids) if c]
+    if not val_cols:
+        return
+    data = Reference(ws, min_col=min(val_cols), max_col=max(val_cols),
+                     min_row=1 if has_header else first_data, max_row=ws.max_row)
+    chart.add_data(data, titles_from_data=has_header)
+    cat_col = _col_index(spec.get("categories"), headers)
+    if cat_col:
+        chart.set_categories(Reference(ws, min_col=cat_col, max_col=cat_col,
+                                       min_row=first_data, max_row=ws.max_row))
+    from openpyxl.utils import get_column_letter
+    anchor = str(spec.get("anchor")
+                 or f"{get_column_letter(ws.max_column + 2)}2")
+    ws.add_chart(chart, anchor)
+
+
 class CreateExcel(Tool):
     name = "create_excel"
     description = ("Create an .xlsx Excel workbook. Headers are bolded and "
-                   "column widths auto-fit.")
+                   "column widths auto-fit. A sheet may include an optional "
+                   "chart built from its own columns.")
     args = {
         "path": "Output file path ending in .xlsx.",
         "sheets": ('List of sheets: [{"name": "Sheet1", "headers": ["col", ...], '
-                   '"rows": [[cell, ...], ...]}, ...]'),
+                   '"rows": [[cell, ...], ...], "chart": {"type": "bar|line|pie", '
+                   '"title": "...", "categories": "<header>", "values": '
+                   '"<header>" or ["<header>", ...]}}]  (chart is optional)'),
     }
     arg_types = {"sheets": {"type": "array", "items": {"type": "object"}}}
     required = ("path", "sheets")
@@ -90,12 +153,20 @@ class CreateExcel(Tool):
                              for r in range(1, ws.max_row + 1)), default=8)
                 ws.column_dimensions[get_column_letter(col)].width = \
                     min(max(width + 2, 8), 60)
+            if isinstance(sheet, dict) and sheet.get("chart"):
+                try:
+                    _add_chart(ws, sheet["chart"], sheet.get("headers"))
+                except Exception:
+                    pass          # a chart glitch must never lose the workbook
         try:
             p.parent.mkdir(parents=True, exist_ok=True)
             wb.save(p)
         except Exception as e:
             return f"ERROR saving {p}: {e}"
-        return f"OK: created {p} with {len(sheets)} sheet(s)."
+        nchart = sum(1 for s in sheets
+                     if isinstance(s, dict) and s.get("chart"))
+        tail = f", {nchart} chart(s)" if nchart else ""
+        return f"OK: created {p} with {len(sheets)} sheet(s){tail}."
 
 
 class CreatePowerPoint(Tool):

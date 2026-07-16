@@ -596,7 +596,32 @@ r = _REG["create_word"].run(
                                   "plain para",
                                   {"type": "bullets", "items": ["i1"]}]}, run_ctx)
 check("create_word writes a document", r.startswith("OK") and (tmp / "t.docx").exists())
-for _f in ("t.xlsx", "t.pptx", "t.docx"):
+
+# create_excel: an optional native chart (openpyxl) — the FAILURE-2 fix, so a
+# 'with a chart' ask no longer makes the model abandon the tool for pandas.
+r = _REG["create_excel"].run(
+    {"path": "tc.xlsx", "sheets": [{
+        "name": "Rev", "headers": ["Department", "Amount (EUR)"],
+        "rows": [["Sales", 120], ["IT", 80]],
+        "chart": {"type": "bar", "title": "By dept",
+                  "categories": "Department", "values": "Amount (EUR)"}}]},
+    run_ctx)
+check("create_excel reports the chart it added",
+      r.startswith("OK") and "1 chart" in r and (tmp / "tc.xlsx").exists())
+import zipfile as _zf
+with _zf.ZipFile(tmp / "tc.xlsx") as _z:
+    check("the saved workbook actually contains a chart part",
+          any("chart" in _n for _n in _z.namelist()))
+# a malformed chart spec must never lose the data workbook (small-model safety)
+r = _REG["create_excel"].run(
+    {"path": "tc2.xlsx", "sheets": [{
+        "headers": ["a", "b"], "rows": [[1, 2]],
+        "chart": {"type": "bar", "values": "no-such-column"}}]},
+    run_ctx)
+check("a bad chart spec is skipped, the data workbook still saves",
+      r.startswith("OK") and (tmp / "tc2.xlsx").exists())
+
+for _f in ("t.xlsx", "t.pptx", "t.docx", "tc.xlsx", "tc2.xlsx"):
     (tmp / _f).unlink(missing_ok=True)
 
 # cleanup
@@ -842,8 +867,14 @@ check("no engineering playbook for small talk",
       select(_code_pool, "hello there") == [])
 check("block renders with header",
       skills_block(select(skills, "excel please")).startswith("# Expert playbooks"))
-check("bundled playbooks stay context-lean (<700 words each)",
-      all(s.words < 700 for s in skills))
+# The REAL constraint is chars, not words: skills_block hard-truncates each body
+# at skills.inject_max_chars (config), so anything past the cap NEVER reaches the
+# model. The old <700-words assert was ~3x that pipe and could not see it. Assert
+# every bundled playbook survives the actual injection cap intact (untrimmed).
+_cap = int(cfg.data.get("skills", {}).get("inject_max_chars", 1500))
+check(f"every bundled playbook survives the injection cap intact "
+      f"(<= {_cap} chars, nothing trimmed)",
+      all("[playbook trimmed]" not in skills_block([s], _cap) for s in skills))
 
 print("\nskill library import (Agent-Skills -> GT format)")
 from gt import skill_import
@@ -2601,6 +2632,134 @@ except UnicodeEncodeError:
 check("ascii fallback encodes cleanly on a legacy Windows code page (cp1252)",
       _legacy_ok)
 check("ascii fallback still names the author", "Sarvesh Singh" in _fout)
+
+print("\nanti-fabrication interlock (a document tool needs its named source read)")
+from gt.tools import Ctx as _ICtx
+_ia = Agent(llm=_StubLLM(), config=Config.load(), memory=_Stub(),
+            router=_Stub(), console=_quiet, improver=_Stub(),
+            approve=lambda *a, **k: True, ask=None)
+_ia._plan_turn = False
+with _tf.TemporaryDirectory() as _ifd:
+    _ifp = Path(_ifd).resolve()
+    (_ifp / "client.csv").write_text(
+        "dept,amount_eur\nOperations,120\nSales,80\n", encoding="utf-8")
+    _ia.cwd = _ifp
+    _cpath = str((_ifp / "client.csv").resolve())
+
+    def _mkctx(msg):
+        return _ICtx(cwd=_ifp, memory=None, approve=lambda *a, **k: True,
+                     config=cfg, user_msg=msg)
+
+    # (1) REFUSE: create_excel about a named-but-unread source is BLOCKED and
+    #     writes nothing — the exact proven FAILURE 1 (invented departments).
+    _xl = {"path": "out.xlsx",
+           "sheets": [{"headers": ["dept"], "rows": [["HR"]]}]}
+    _ctx = _mkctx("summarize client.csv into an excel by department")
+    _obs = _ia._run_tool({"tool": "create_excel", "args": dict(_xl)}, _ctx)
+    check("create_excel about an unread named source is BLOCKED (nothing built)",
+          _obs.startswith("BLOCKED") and not (_ifp / "out.xlsx").exists())
+    check("the BLOCKED refusal teaches the read_file recovery (not a bare deny)",
+          "read_file" in _obs)
+
+    # (2) ALLOW: read the source, then the SAME call runs through — proving the
+    #     'BLOCKED:' prefix keeps it out of the failed_calls loop-breaker.
+    _rd = _ia._run_tool({"tool": "read_file", "args": {"path": "client.csv"}},
+                        _ctx)
+    check("read_file on the source records it as grounded",
+          _cpath in _ctx.state.get("grounded", set()))
+    _obs2 = _ia._run_tool({"tool": "create_excel", "args": dict(_xl)}, _ctx)
+    check("after reading, the identical create_excel call is allowed through",
+          _obs2.startswith("OK") and (_ifp / "out.xlsx").exists())
+
+    # (3) NO FALSE POSITIVE: a from-scratch deck naming no source is never gated.
+    _ctx3 = _mkctx("make me a blank project-plan deck")
+    _obs3 = _ia._run_tool(
+        {"tool": "create_powerpoint",
+         "args": {"path": "plan.pptx", "title": "Plan",
+                  "slides": [{"title": "Kickoff", "bullets": ["x"]}]}}, _ctx3)
+    check("a from-scratch deck naming no source file is allowed",
+          _obs3.startswith("OK") and (_ifp / "plan.pptx").exists())
+
+    # (4) an INVENTED filename (named but not on disk) is not a source.
+    _ctx4 = _mkctx("build an excel from ghost_data.csv")
+    _obs4 = _ia._run_tool(
+        {"tool": "create_excel",
+         "args": {"path": "g.xlsx", "sheets": [{"rows": [[1]]}]}}, _ctx4)
+    check("a named-but-nonexistent file does not gate (nothing to ground)",
+          _obs4.startswith("OK"))
+
+    # (5) run_command NAMING the source grounds it (the `cat file` recipe).
+    _ctx5 = _mkctx("read client.csv then make report.docx")
+    _ia._run_tool({"tool": "run_command",
+                   "args": {"command": "cat client.csv"}}, _ctx5)
+    check("a run_command naming the source grounds it",
+          _cpath in _ctx5.state.get("grounded", set()))
+    _obs5 = _ia._run_tool(
+        {"tool": "create_word",
+         "args": {"path": "report.docx", "blocks": ["Operations: 120"]}}, _ctx5)
+    check("create_word is allowed once the source was cat'd", _obs5.startswith("OK"))
+
+    # (6) a bare command that does NOT name the source launders nothing.
+    _ctx6 = _mkctx("summarize client.csv into summary.xlsx")
+    _ia._run_tool({"tool": "run_command", "args": {"command": "ls -la"}}, _ctx6)
+    _obs6 = _ia._run_tool(
+        {"tool": "create_excel",
+         "args": {"path": "summary.xlsx", "sheets": [{"rows": [[1]]}]}}, _ctx6)
+    check("a bare `ls` does not launder an ungrounded deliverable",
+          _obs6.startswith("BLOCKED"))
+
+    # (7) a BINARY .xlsx source read returns mojibake — read_file must NOT
+    #     ground it, so the model is steered to a script instead.
+    (_ifp / "book.xlsx").write_bytes(b"PK\x03\x04 not-real-xlsx-bytes")
+    _ctx7 = _mkctx("summarize book.xlsx into out2.xlsx")
+    _ia._run_tool({"tool": "read_file", "args": {"path": "book.xlsx"}}, _ctx7)
+    _obs7 = _ia._run_tool(
+        {"tool": "create_excel",
+         "args": {"path": "out2.xlsx", "sheets": [{"rows": [[1]]}]}}, _ctx7)
+    check("read_file on a binary .xlsx source does NOT ground it (stays BLOCKED)",
+          _obs7.startswith("BLOCKED"))
+
+# End-to-end through the real run() loop: fabricate -> BLOCK -> read -> the
+# identical retry SUCCEEDS (the loop-breaker never locks it, because BLOCKED is
+# excluded from failed_calls/tool_errors at the run-loop recording check).
+class _FabricateLLM:
+    last_metrics = None
+    def __init__(self):
+        self.calls = 0
+        self.observations = []
+    def chat(self, role, messages, **kw):
+        if not kw.get("stream"):
+            return "confidence: 95\nreading: clear\nquestion: none"
+        self.calls += 1
+        if self.calls > 1:
+            self.observations.append(messages[-1]["content"])
+        _xlc = ('```json\n{"tool":"create_excel","args":{"path":"out.xlsx",'
+                '"sheets":[{"headers":["dept"],"rows":[["HR"]]}]}}\n```')
+        reply = {1: _xlc,
+                 2: '```json\n{"tool":"read_file","args":{"path":"real.csv"}}\n```',
+                 3: _xlc,
+                 4: "Done — the workbook is built from the file."}.get(
+                     self.calls, "Done.")
+        if kw.get("on_token"):
+            kw["on_token"](reply)
+        return reply
+
+with _tf.TemporaryDirectory() as _fabd_s:
+    _fabd = Path(_fabd_s).resolve()
+    (_fabd / "real.csv").write_text("dept,amount_eur\nOps,10\n", encoding="utf-8")
+    _fab = _FabricateLLM()
+    _faba = _gate_agent(_fab)
+    _faba.cwd = _fabd
+    _faba.run("summarize real.csv into out.xlsx")
+    check("live: create_excel with zero reads of the named CSV is BLOCKED",
+          _fab.observations and "BLOCKED" in _fab.observations[0]
+          and "create_excel" in _fab.observations[0])
+    # out.xlsx exists ONLY if the step-3 retry ran (step 1 was blocked, wrote
+    # nothing); no 'REFUSED' anywhere proves the loop-breaker never locked it.
+    _faball = "\n".join(_fab.observations)
+    check("live: after reading, the identical create_excel retry SUCCEEDS "
+          "(BLOCKED did not trip the loop-breaker)",
+          (_fabd / "out.xlsx").exists() and "REFUSED" not in _faball)
 
 print(f"\n{'='*40}\n{ok} passed, {fail} failed")
 sys.exit(1 if fail else 0)
