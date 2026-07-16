@@ -50,7 +50,7 @@ fi
 # GT's first launch evaluates this machine's hardware and offers the bigger
 # models (up to 14B) only if the machine can actually run them.
 echo
-echo "Downloading the baseline models (~2.3 GB on a fresh machine):"
+echo "Downloading the baseline models (~1.3 GB on a fresh machine):"
 echo "  qwen2.5:1.5b (minimum) + nomic-embed-text (memory)"
 for m in qwen2.5:1.5b nomic-embed-text; do
   ollama pull "$m" || echo "[WARN] could not pull $m — run 'ollama pull $m' later."

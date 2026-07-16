@@ -65,7 +65,7 @@ setup.bat          ::  macOS/Linux:  ./setup.sh
 The script installs GT-Code into **its own `.venv` inside the GT-code folder**
 (one environment for GT itself — never one per project), **installs Ollama** if
 missing (winget on Windows, brew/curl elsewhere), pulls the tiny baseline
-models (~2.3 GB), installs a global **`gt` command**, and self-tests that the
+models (~1.3 GB), installs a global **`gt` command**, and self-tests that the
 command works from a different folder. Then:
 
 ```bat
