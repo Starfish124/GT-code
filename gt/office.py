@@ -60,6 +60,11 @@ def _col_index(ident, headers):
 
 def _add_chart(ws, spec, headers):
     """Add one native chart to a worksheet from an optional {"chart": ...} spec.
+    Returns True if a chart was actually embedded, False if the spec was
+    malformed or there was no data to chart — the caller's own success
+    message must reflect this, not just that a chart was REQUESTED (a live
+    test caught GT reporting "2 chart(s)" when zero were actually added,
+    because ws.max_row < first_data made every add a silent no-op).
 
     Kept forgiving and non-fatal: a malformed spec is skipped, never allowed to
     lose the data workbook the model actually needed. Columns are named by their
@@ -67,7 +72,7 @@ def _add_chart(ws, spec, headers):
     columns), which is what a small model can produce from what it just read."""
     from openpyxl.chart import BarChart, LineChart, PieChart, Reference
     if not isinstance(spec, dict):
-        return
+        return False
     kinds = {"bar": BarChart, "line": LineChart, "pie": PieChart}
     chart = kinds.get(str(spec.get("type", "bar")).lower(), BarChart)()
     if spec.get("title"):
@@ -75,12 +80,12 @@ def _add_chart(ws, spec, headers):
     has_header = bool(headers)
     first_data = 2 if has_header else 1
     if ws.max_row < first_data:
-        return
+        return False
     val_ids = spec.get("values")
     val_ids = val_ids if isinstance(val_ids, list) else [val_ids]
     val_cols = [c for c in (_col_index(v, headers) for v in val_ids) if c]
     if not val_cols:
-        return
+        return False
     data = Reference(ws, min_col=min(val_cols), max_col=max(val_cols),
                      min_row=1 if has_header else first_data, max_row=ws.max_row)
     chart.add_data(data, titles_from_data=has_header)
@@ -92,6 +97,7 @@ def _add_chart(ws, spec, headers):
     anchor = str(spec.get("anchor")
                  or f"{get_column_letter(ws.max_column + 2)}2")
     ws.add_chart(chart, anchor)
+    return True
 
 
 class CreateExcel(Tool):
@@ -137,6 +143,7 @@ class CreateExcel(Tool):
 
         wb = Workbook()
         wb.remove(wb.active)
+        nchart = 0
         for i, sheet in enumerate(sheets):
             if isinstance(sheet, list):            # model sent a bare row list
                 sheet = {"rows": sheet}
@@ -155,7 +162,8 @@ class CreateExcel(Tool):
                     min(max(width + 2, 8), 60)
             if isinstance(sheet, dict) and sheet.get("chart"):
                 try:
-                    _add_chart(ws, sheet["chart"], sheet.get("headers"))
+                    if _add_chart(ws, sheet["chart"], sheet.get("headers")):
+                        nchart += 1
                 except Exception:
                     pass          # a chart glitch must never lose the workbook
         try:
@@ -163,8 +171,6 @@ class CreateExcel(Tool):
             wb.save(p)
         except Exception as e:
             return f"ERROR saving {p}: {e}"
-        nchart = sum(1 for s in sheets
-                     if isinstance(s, dict) and s.get("chart"))
         tail = f", {nchart} chart(s)" if nchart else ""
         return f"OK: created {p} with {len(sheets)} sheet(s){tail}."
 

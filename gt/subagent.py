@@ -22,6 +22,7 @@ Deliberately scaled to GT's constraints:
     the report from what it has. The report is capped before it returns.
 """
 
+import json
 import platform
 from pathlib import Path
 
@@ -161,6 +162,9 @@ def run_subagent(llm, config, memory, cwd, task, role, console=None):
     nudged_json = False
     nudged_fail = False
     last_failed = False
+    seen_calls = {}   # (tool, args) -> first line of its result; the toolset
+                      # is read-only, so an identical repeat can only return
+                      # the identical answer — pure step-budget waste.
     while steps < max_steps:
         try:
             reply = llm.chat(role, messages, stream=False,
@@ -206,8 +210,14 @@ def run_subagent(llm, config, memory, cwd, task, role, console=None):
         for call in calls:
             name = call.get("tool")
             args = call.get("args") or {}
+            key = (name, json.dumps(args, sort_keys=True, default=str))
             tool = tools.get(name)
-            if tool is None:
+            if key in seen_calls:
+                obs = (f"REFUSED: you already made exactly this {name} call "
+                       f"this run — it returned: {seen_calls[key]}\nThe "
+                       f"answer cannot change. Use what you already have, "
+                       f"take a different step, or write your final report.")
+            elif tool is None:
                 obs = (f"ERROR: '{name}' is not available to a sub-agent "
                        f"(read-only). Your tools: {', '.join(tools)}. If the "
                        f"job needs changes or commands, recommend them in "
@@ -217,8 +227,12 @@ def run_subagent(llm, config, memory, cwd, task, role, console=None):
                     obs = tool.run(args, ctx)
                 except Exception as e:
                     obs = f"ERROR running {name}: {e}"
+            if key not in seen_calls:
+                seen_calls[key] = next(
+                    (l.strip()[:100] for l in obs.splitlines() if l.strip()),
+                    "")
             steps += 1
-            last_failed = obs.startswith("ERROR")
+            last_failed = obs.startswith(("ERROR", "REFUSED"))
             target = next((str(args.get(k)) for k in _TARGET_ARGS
                            if args.get(k)), "")
             if len(target) > 60:

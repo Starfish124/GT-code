@@ -91,6 +91,19 @@ small = [{"role": "system", "content": "SYS"},
          {"role": "user", "content": "hi"}]
 check("small conversations are left alone", _fit(_FakeAgent(), small) is False)
 
+# The chars/4 estimate under-counts real BPE tokens on code/data-heavy content
+# (observed live: Ollama's real prompt_tokens hit 7836/8192 while this
+# estimate still looked comfortably under the old 1024-token margin, leaving
+# so little generation headroom the next reply came back empty). The margin
+# widened to 2048 specifically to compact BEFORE that zone, not just after.
+_margin_msgs = ([{"role": "system", "content": "SYS"}]
+                + [{"role": "user",
+                    "content": f"[tool result: run_command]\n{'x' * 8700}"}
+                   for _ in range(3)])
+check("the tighter 2048-token reserved margin compacts sooner than the old "
+      "1024 margin would have (~6546 estimated tok: over new, under old)",
+      _fit(_FakeAgent(), _margin_msgs) is True)
+
 print("\nagent loop end-to-end (stubbed LLM — no model needed)")
 import io
 from rich.console import Console as _Console
@@ -263,6 +276,32 @@ check("a fresh project venv passes the rail",
 check("non-venv python commands pass the rail",
       RunCommand._self_venv_guard("python -m pip install venv-helper", tmp)
       is None)
+
+print("\nrun_command flail guard (live: pandas-install rabbit hole + python -c "
+      "SyntaxError, both proven to burn a whole turn's step budget)")
+check("installing pandas is refused and steers to the stdlib csv module",
+      "ERROR" in (RunCommand._flail_guard("python3 -m pip install pandas") or "")
+      and "csv" in RunCommand._flail_guard("python3 -m pip install pandas"))
+check("bare `pip install numpy` is refused too, not just `-m pip`",
+      "ERROR" in (RunCommand._flail_guard("pip install numpy") or ""))
+check("scipy/matplotlib/scikit-learn/sklearn are all refused",
+      all(RunCommand._flail_guard(f"pip install {p}")
+          for p in ("scipy", "matplotlib", "scikit-learn", "sklearn")))
+check("installing an UNRELATED package (flask) is never touched",
+      RunCommand._flail_guard("pip install flask") is None)
+check("a `python -c` one-liner with a compound statement after ';' is refused "
+      "(the exact live SyntaxError: import csv; with open(...): for row...)",
+      "ERROR" in (RunCommand._flail_guard(
+          "python3 -c \"import csv; with open('f.csv') as f: "
+          "rows = list(csv.DictReader(f))\"") or ""))
+check("a trivial `python -c` with no compound statement is allowed",
+      RunCommand._flail_guard('python3 -c "print(1+1)"') is None)
+check("a VALID semicolon-chained one-liner (simple statements only) is allowed",
+      RunCommand._flail_guard(
+          "python3 -c \"import csv; rows = list(csv.DictReader(open('f.csv'))); "
+          "print(len(rows))\"") is None)
+check("running a real script file is never touched by either guard",
+      RunCommand._flail_guard("python3 aggregation_script.py") is None)
 
 print("\nprompt examples name no concrete deliverable (the 1.5B parroted one)")
 import gt.prompts as _pmod
@@ -620,8 +659,19 @@ r = _REG["create_excel"].run(
     run_ctx)
 check("a bad chart spec is skipped, the data workbook still saves",
       r.startswith("OK") and (tmp / "tc2.xlsx").exists())
+# live bug: a chart requested on a HEADER-ONLY sheet (zero data rows) silently
+# no-ops in _add_chart, but the old code counted REQUESTED charts, not
+# embedded ones, so GT reported "1 chart(s)" when none were actually added.
+r = _REG["create_excel"].run(
+    {"path": "tc3.xlsx", "sheets": [{
+        "headers": ["Department", "Amount (EUR)"], "rows": [],
+        "chart": {"type": "bar", "categories": "Department",
+                  "values": "Amount (EUR)"}}]},
+    run_ctx)
+check("a chart on a zero-row sheet is truthfully NOT reported as added",
+      r.startswith("OK") and "chart" not in r and (tmp / "tc3.xlsx").exists())
 
-for _f in ("t.xlsx", "t.pptx", "t.docx", "tc.xlsx", "tc2.xlsx"):
+for _f in ("t.xlsx", "t.pptx", "t.docx", "tc.xlsx", "tc2.xlsx", "tc3.xlsx"):
     (tmp / _f).unlink(missing_ok=True)
 
 # cleanup
@@ -2233,6 +2283,22 @@ check("mimicry is caught mid-reply as well (live: after a parroted line)",
                               "[tool result: read_file(x) -> OK]", [])
       == "mimicry")
 
+# An empty reply is never accepted as "the model is done" — live it silently
+# ended a turn with real computed data (a script's stdout) never reaching
+# create_excel, right after the prompt hit 7836/8192 tokens.
+check("a fully empty reply is classified 'empty', not a legitimate answer",
+      _mimagent._stall_reason("", []) == "empty")
+check("a whitespace-only reply is 'empty' too",
+      _mimagent._stall_reason("   \n  \t", []) == "empty")
+check("a single stray character is 'empty' (not a real answer)",
+      _mimagent._stall_reason("x", []) == "empty")
+check("a genuine short answer is NOT misclassified as empty",
+      _mimagent._stall_reason("Done.", []) is None)
+_mimagent._plan_turn = True
+check("empty beats the plan-turn bypass — a plan's job is prose, not nothing",
+      _mimagent._stall_reason("", []) == "empty")
+_mimagent._plan_turn = False
+
 class _DoubleMimicLLM:
     """Mimics TWICE (observed live) — unlike other stalls, mimicry must be
     nudged every time, because a faked block is never a real answer."""
@@ -2441,6 +2507,305 @@ _fl_errors = [o for o in _flllm.observations if "ERROR:" in o]
 _fl_refused = [o for o in _flllm.observations if "failed 3 times" in o]
 check("a tool flailing on its OWN validation errors is cut off after 3",
       len(_fl_errors) == 3 and _fl_refused)
+
+# Loop-breaker FALSE POSITIVE fix (observed live: after a blocked pip install
+# the model fixed its script, but re-running `python generate_excel_report.py`
+# was refused because the COMMAND STRING was identical): an identical call
+# that failed is allowed to retry once the workspace has changed since.
+class _EditRetryLLM:
+    last_metrics = None
+    def __init__(self):
+        self.calls = 0
+        self.observations = []
+    def chat(self, role, messages, **kw):
+        self.calls += 1
+        if self.calls > 1:
+            self.observations.append(messages[-1]["content"])
+        reply = {
+            1: '```json\n{"tool":"read_file","args":{"path":"notes_lb.txt"}}\n```',
+            2: ('```json\n{"tool":"write_file","args":{"path":"notes_lb.txt",'
+                '"content":"hello"}}\n```'),
+            3: '```json\n{"tool":"read_file","args":{"path":"notes_lb.txt"}}\n```',
+        }.get(self.calls, "The file now says hello.")
+        if kw.get("on_token"):
+            kw["on_token"](reply)
+        return reply
+
+import tempfile as _tf_lb
+with _tf_lb.TemporaryDirectory() as _erd_s:
+    _erd = Path(_erd_s).resolve()
+    _erllm = _EditRetryLLM()
+    _eragent = Agent(llm=_erllm, config=Config.load(), memory=_Stub(),
+                     router=_Stub(), console=_quiet, improver=_Stub(),
+                     approve=lambda *a, **k: True, ask=None)
+    _eragent.cwd = _erd
+    _eragent.run("read the notes")
+    check("an identical retry AFTER a workspace change is allowed, not refused",
+          "ERROR" in _erllm.observations[0]
+          and "hello" in _erllm.observations[2]
+          and "REFUSED" not in "\n".join(_erllm.observations))
+
+# Success-side loop breaker (observed live: the SAME 352-char README written
+# 4x in a row, each run burning a fresh permission prompt — failed_calls
+# never fired because every write SUCCEEDED): an identical call that already
+# succeeded, with the workspace unchanged since, is SKIPPED without running
+# and without prompting the user.
+class _RepeatWriteLLM:
+    last_metrics = None
+    def __init__(self):
+        self.calls = 0
+        self.observations = []
+    def chat(self, role, messages, **kw):
+        self.calls += 1
+        if self.calls > 1:
+            self.observations.append(messages[-1]["content"])
+        reply = (('```json\n{"tool":"write_file","args":{"path":"README_lb.md",'
+                  '"content":"# readme"}}\n```')
+                 if self.calls <= 2 else "Wrote the readme.")
+        if kw.get("on_token"):
+            kw["on_token"](reply)
+        return reply
+
+with _tf_lb.TemporaryDirectory() as _rwd_s:
+    _rwd = Path(_rwd_s).resolve()
+    _rw_approvals = []
+    _rwllm = _RepeatWriteLLM()
+    _rwagent = Agent(llm=_rwllm, config=Config.load(), memory=_Stub(),
+                     router=_Stub(), console=_quiet, improver=_Stub(),
+                     approve=lambda *a, **k: _rw_approvals.append(1) or True,
+                     ask=None)
+    _rwagent.cwd = _rwd
+    _rwagent.run("update the readme file")
+    check("an identical call that already SUCCEEDED is skipped, not re-run",
+          "OK: wrote" in _rwllm.observations[0]
+          and "SKIPPED: you already made exactly this" in _rwllm.observations[1])
+    check("the skipped duplicate never reaches the permission prompt",
+          len(_rw_approvals) == 1
+          and (_rwd / "README_lb.md").read_text(encoding="utf-8") == "# readme")
+check("SKIPPED steps are not marked FAILED in the digest",
+      not digest_line("write_file", {"path": "x"},
+                      "SKIPPED: you already made exactly this call...")
+      .startswith("- FAILED"))
+
+# Office-script detour guard (observed live: qwen3:8b computed every value
+# correctly with the stdlib, then wrote a brand-new pandas/openpyxl generator
+# script — and tried to pip install it — instead of calling create_excel).
+from gt.tools import WriteFile
+with _tf_lb.TemporaryDirectory() as _osd_s:
+    _osd = Path(_osd_s).resolve()
+    _os_ctx = Ctx(cwd=_osd, memory=None, approve=lambda *a, **k: True,
+                  config=cfg,
+                  user_msg="make me an excel summary of sales.csv by department")
+    _os_out = WriteFile().run(
+        {"path": "gen_report.py",
+         "content": "import openpyxl\nwb = openpyxl.Workbook()\n"}, _os_ctx)
+    check("a NEW office-generator script is refused and taught the native tool",
+          _os_out.startswith("ERROR") and "create_excel" in _os_out
+          and not (_osd / "gen_report.py").exists())
+    _os_out2 = WriteFile().run(
+        {"path": "gen_report2.py",
+         "content": "import pandas as pd\ndf.to_excel('out.xlsx')\n"}, _os_ctx)
+    check("the pandas to_excel signature is caught too",
+          _os_out2.startswith("ERROR"))
+    _os_ctx3 = Ctx(cwd=_osd, memory=None, approve=lambda *a, **k: True,
+                   config=cfg,
+                   user_msg="write me a python script that exports sales.csv "
+                            "to excel")
+    _os_out3 = WriteFile().run(
+        {"path": "export.py",
+         "content": "import openpyxl\nwb = openpyxl.Workbook()\n"}, _os_ctx3)
+    check("an explicitly requested script is the deliverable — allowed",
+          _os_out3.startswith("OK") and (_osd / "export.py").exists())
+    (_osd / "existing.py").write_text("x = 1\n", encoding="utf-8")
+    _os_out4 = WriteFile().run(
+        {"path": "existing.py", "content": "import openpyxl\n"}, _os_ctx)
+    check("rewriting an EXISTING script is maintenance, not blocked",
+          _os_out4.startswith("OK"))
+    _os_out5 = WriteFile().run(
+        {"path": "agg.py",
+         "content": "import csv\nfrom collections import Counter\n"}, _os_ctx)
+    check("a stdlib compute script is never blocked",
+          _os_out5.startswith("OK"))
+
+# Cascade breaker: every call a DIFFERENT dead end (so the identical-call
+# rails can't fire) — nudge after 4 consecutive no-progress calls, honest
+# stop at 7 instead of burning the rest of max_steps (20).
+class _CascadeLLM:
+    last_metrics = None
+    def __init__(self):
+        self.calls = 0
+        self.observations = []
+    def chat(self, role, messages, **kw):
+        self.calls += 1
+        if self.calls > 1:
+            self.observations.append(messages[-1]["content"])
+        reply = (f'```json\n{{"tool":"read_file","args":'
+                 f'{{"path":"missing{self.calls}.txt"}}}}\n```')
+        if kw.get("on_token"):
+            kw["on_token"](reply)
+        return reply
+
+_cllm = _CascadeLLM()
+_cagent = Agent(llm=_cllm, config=Config.load(), memory=_Stub(),
+                router=_Stub(), console=_quiet, improver=_Stub(),
+                approve=lambda *a, **k: True, ask=None)
+_cagent.run("check the files")
+check("4 consecutive dead ends draw the stop-and-rethink nudge",
+      any("going in circles" in o for o in _cllm.observations))
+check("7 consecutive dead ends END the turn (not the full step budget)",
+      _cllm.calls == 7)
+
+# ...and one real success in between RESETS the streak — a long, legitimately
+# bumpy debugging session must not be cut off.
+class _BumpyLLM:
+    last_metrics = None
+    def __init__(self):
+        self.calls = 0
+        self.observations = []
+    def chat(self, role, messages, **kw):
+        self.calls += 1
+        if self.calls > 1:
+            self.observations.append(messages[-1]["content"])
+        seq = {1: ("read_file", "missA.txt"), 2: ("list_dir", "missB"),
+               3: ("read_file", "missC.txt"), 4: ("read_file", "notes.txt"),
+               5: ("read_file", "missD.txt"), 6: ("list_dir", "missE"),
+               7: ("list_dir", "missF")}
+        step = seq.get(self.calls)
+        reply = (f'```json\n{{"tool":"{step[0]}","args":{{"path":"{step[1]}"}}}}\n```'
+                 if step else "Those files are missing; notes.txt is the only one.")
+        if kw.get("on_token"):
+            kw["on_token"](reply)
+        return reply
+
+with _tf_lb.TemporaryDirectory() as _bmd_s:
+    _bmd = Path(_bmd_s).resolve()
+    (_bmd / "notes.txt").write_text("hello", encoding="utf-8")
+    _bllm = _BumpyLLM()
+    _bagent = Agent(llm=_bllm, config=Config.load(), memory=_Stub(),
+                    router=_Stub(), console=_quiet, improver=_Stub(),
+                    approve=lambda *a, **k: True, ask=None)
+    _bagent.cwd = _bmd
+    _bagent.run("check the files")
+    check("a success mid-cascade resets the no-progress streak",
+          not any("going in circles" in o for o in _bllm.observations))
+
+# Mimicry cap: a model locked into faking its bookkeeping block used to be
+# re-nudged all the way to max_steps (20 full inferences); now the turn stops
+# honestly after 3 nudges.
+class _MimicLLM:
+    last_metrics = None
+    calls = 0
+    def chat(self, role, messages, **kw):
+        _MimicLLM.calls += 1
+        reply = "[actions taken this turn]\n- write_file(x) -> OK"
+        if kw.get("on_token"):
+            kw["on_token"](reply)
+        return reply
+
+_MimicLLM.calls = 0
+_magent = Agent(llm=_MimicLLM(), config=Config.load(), memory=_Stub(),
+                router=_Stub(), console=_quiet, improver=_Stub(),
+                approve=lambda *a, **k: True, ask=None)
+_magent.run("fix the file")
+check("a model locked into digest mimicry is stopped after 3 nudges",
+      _MimicLLM.calls == 4)
+
+# Double-empty: a second empty reply after the 'empty' nudge used to be
+# accepted as the final answer — the turn ended in total silence.
+class _EmptyLLM:
+    last_metrics = None
+    calls = 0
+    def chat(self, role, messages, **kw):
+        _EmptyLLM.calls += 1
+        if kw.get("on_token"):
+            kw["on_token"]("")
+        return ""
+
+_EmptyLLM.calls = 0
+_eout = io.StringIO()
+_econsole = _Console(file=_eout, force_terminal=False, width=120)
+_eagent = Agent(llm=_EmptyLLM(), config=Config.load(), memory=_Stub(),
+                router=_Stub(), console=_econsole, improver=_Stub(),
+                approve=lambda *a, **k: True, ask=None)
+_eagent.run("fix the file")
+check("a double-empty turn tells the user instead of ending silently",
+      _EmptyLLM.calls == 2 and "empty reply twice" in _eout.getvalue())
+
+# Write ping-pong: A-B-A-B identical rewrites keep advancing the mutation
+# epoch, so the epoch rule alone would allow them forever — the per-key
+# success cap (2) stops the third identical write.
+class _PingPongLLM:
+    last_metrics = None
+    def __init__(self):
+        self.calls = 0
+        self.observations = []
+    def chat(self, role, messages, **kw):
+        self.calls += 1
+        if self.calls > 1:
+            self.observations.append(messages[-1]["content"])
+        _wa = '```json\n{"tool":"write_file","args":{"path":"a_pp.txt","content":"1"}}\n```'
+        _wb = '```json\n{"tool":"write_file","args":{"path":"b_pp.txt","content":"2"}}\n```'
+        reply = {1: _wa, 2: _wb, 3: _wa, 4: _wb, 5: _wa}.get(
+            self.calls, "Both files are written.")
+        if kw.get("on_token"):
+            kw["on_token"](reply)
+        return reply
+
+with _tf_lb.TemporaryDirectory() as _ppd_s:
+    _ppd = Path(_ppd_s).resolve()
+    _ppllm = _PingPongLLM()
+    _ppagent = Agent(llm=_ppllm, config=Config.load(), memory=_Stub(),
+                     router=_Stub(), console=_quiet, improver=_Stub(),
+                     approve=lambda *a, **k: True, ask=None)
+    _ppagent.cwd = _ppd
+    _ppagent.run("update the two files")
+    check("the third identical write is skipped despite the epoch advancing",
+          "SKIPPED: you already made exactly this" in _ppllm.observations[4])
+
+# pip install-cascade memory: once an install of a package failed, every
+# retry of the SAME package is refused whatever the pip spelling.
+from gt.tools import RunCommand
+check("_pip_pkgs reads packages across chained segments, ignoring pip itself",
+      RunCommand._pip_pkgs(
+          r"pip install --upgrade pip && .venv\Scripts\pip install pyautogui")
+      == {"pyautogui"}
+      and RunCommand._pip_pkgs("python -m pip install foo==1.2 bar")
+      == {"foo==1.2", "bar"}
+      and RunCommand._pip_pkgs("echo hi") == set())
+with _tf_lb.TemporaryDirectory() as _pfd_s:
+    _pfd = Path(_pfd_s).resolve()
+    _pf_ctx = Ctx(cwd=_pfd, memory=None, approve=lambda *a, **k: True,
+                  config=cfg, user_msg="install it")
+    _pf_out = RunCommand().run(
+        {"command": "definitely_missing_cmd_xyz -m pip install fakepkg",
+         "timeout": 30}, _pf_ctx)
+    check("a failed pip install records its package for the turn",
+          _pf_out.startswith("exit code: ")
+          and "fakepkg" in _pf_ctx.state.get("pip_failed", set()))
+    _pf_approvals = []
+    _pf_ctx.approve = lambda *a, **k: _pf_approvals.append(1) or True
+    _pf_out2 = RunCommand().run(
+        {"command": "pip3 install fakepkg"}, _pf_ctx)
+    check("retrying the same package with another pip spelling is refused",
+          _pf_out2.startswith("ERROR") and "already failed this turn" in _pf_out2
+          and not _pf_approvals)
+
+# Sub-agent duplicate breaker: identical repeat of a read-only call is
+# refused (the answer cannot change) instead of burning the 8-step budget.
+_dupllm = _SubLLM(
+    ['```json\n{"tool":"read_file","args":{"path":"notes_sub.txt"}}\n```',
+     '```json\n{"tool":"read_file","args":{"path":"notes_sub.txt"}}\n```',
+     "Report: notes_sub.txt says hello."])
+with _tf_lb.TemporaryDirectory() as _sdd_s:
+    _sdd = Path(_sdd_s).resolve()
+    (_sdd / "notes_sub.txt").write_text("hello", encoding="utf-8")
+    _dup_rep, _dup_steps = run_subagent(_dupllm, _sacfg, None, _sdd,
+                                        "read the notes", "tiny",
+                                        console=_quiet)
+    check("a sub-agent's identical repeat call is refused, not re-run",
+          any("REFUSED: you already made exactly this read_file"
+              in m for m in _dupllm.messages_seen)
+          and _dup_rep.startswith("Report:"))
 
 check("intent gate: a flat 0% confidence fails open instead of asking",
       IntentGate(_GateReplyLLM(
@@ -2718,6 +3083,81 @@ with _tf.TemporaryDirectory() as _ifd:
          "args": {"path": "out2.xlsx", "sheets": [{"rows": [[1]]}]}}, _ctx7)
     check("read_file on a binary .xlsx source does NOT ground it (stays BLOCKED)",
           _obs7.startswith("BLOCKED"))
+
+    # (8) EMPTY DELIVERABLE: the source WAS read (grounded), but the call
+    #     itself has zero data rows — a quieter cousin of fabrication (real
+    #     column names, real read_file, then an empty file) caught live.
+    _ctx8 = _mkctx("summarize client.csv into an excel by department")
+    _ia._run_tool({"tool": "read_file", "args": {"path": "client.csv"}}, _ctx8)
+    _obs8 = _ia._run_tool(
+        {"tool": "create_excel",
+         "args": {"path": "empty.xlsx",
+                  "sheets": [{"headers": ["dept", "amount_eur"], "rows": []}]}},
+        _ctx8)
+    check("a grounded source with zero data rows is BLOCKED (empty deliverable)",
+          _obs8.startswith("BLOCKED") and not (_ifp / "empty.xlsx").exists())
+    check("the empty-deliverable refusal names the reason, not a bare deny",
+          "zero data rows" in _obs8)
+
+    # (9) the SAME grounded turn with REAL rows is allowed — the empty-content
+    #     check must not become a blanket block on every grounded call.
+    _obs9 = _ia._run_tool(
+        {"tool": "create_excel",
+         "args": {"path": "real.xlsx",
+                  "sheets": [{"headers": ["dept", "amount_eur"],
+                              "rows": [["Operations", 120], ["Sales", 80]]}]}},
+        _ctx8)
+    check("the same grounded turn with real rows is allowed through",
+          _obs9.startswith("OK") and (_ifp / "real.xlsx").exists())
+
+    # (10) NO FALSE POSITIVE: a from-scratch template naming no source is
+    #      allowed to be sparse — emptiness is only suspect once a real
+    #      source was named and read.
+    _ctx10 = _mkctx("make me a blank expense-tracker template")
+    _obs10 = _ia._run_tool(
+        {"tool": "create_excel",
+         "args": {"path": "template.xlsx",
+                  "sheets": [{"headers": ["dept", "amount_eur"], "rows": []}]}},
+        _ctx10)
+    check("a blank template with no named source is NOT blocked for emptiness",
+          _obs10.startswith("OK") and (_ifp / "template.xlsx").exists())
+
+    # (11) NUMERIC PROVENANCE: grounded and non-empty, but the totals were
+    #      computed in the model's HEAD (proven live on qwen3:8b:
+    #      1200.50+99.50 shipped as 1299, 450.25+49.75 as 499 — decimal
+    #      carries dropped). A number in no read/printed text is BLOCKED.
+    _ctx11 = _mkctx("summarize client.csv into an excel by department")
+    _ia._run_tool({"tool": "read_file", "args": {"path": "client.csv"}},
+                  _ctx11)
+    _hd = {"path": "head.xlsx",
+           "sheets": [{"headers": ["dept", "total_eur"],
+                       "rows": [["Operations", 199]]}]}
+    _obs11 = _ia._run_tool({"tool": "create_excel", "args": _hd}, _ctx11)
+    check("head-math numbers (in no read/printed text) are BLOCKED",
+          _obs11.startswith("BLOCKED") and "199" in _obs11
+          and not (_ifp / "head.xlsx").exists())
+    check("the numeric refusal teaches the print-a-script recovery",
+          "PRINTS" in _obs11 and "run_command" in _obs11)
+
+    # (12) the same numbers PRINTED by a command become provenance — the
+    #      identical call then passes (the designed script recovery).
+    _ctx11.state.setdefault("corpus", []).append(
+        "exit code: 0\nstdout:\nOperations 199\n")
+    _obs12 = _ia._run_tool({"tool": "create_excel", "args": _hd}, _ctx11)
+    check("script-printed numbers pass the provenance check",
+          _obs12.startswith("OK") and (_ifp / "head.xlsx").exists())
+
+    # (13) user-dictated numbers count as provenance; small integers
+    #      (ordinals/counts) are exempt.
+    _ctx13 = _mkctx("make an excel from client.csv: Operations budget 5000")
+    _ia._run_tool({"tool": "read_file", "args": {"path": "client.csv"}},
+                  _ctx13)
+    _obs13 = _ia._run_tool(
+        {"tool": "create_excel",
+         "args": {"path": "user.xlsx",
+                  "sheets": [{"rows": [["Operations", 5000, 3]]}]}}, _ctx13)
+    check("user-dictated numbers and small ordinals pass",
+          _obs13.startswith("OK"))
 
 # End-to-end through the real run() loop: fabricate -> BLOCK -> read -> the
 # identical retry SUCCEEDS (the loop-breaker never locks it, because BLOCKED is

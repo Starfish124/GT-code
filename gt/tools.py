@@ -103,6 +103,9 @@ class WriteFile(Tool):
     def run(self, args, ctx):
         p = ctx.resolve(args["path"])
         content = args.get("content", "")
+        guard = _office_script_guard(p, content, ctx)
+        if guard:
+            return guard
         outside = ctx.confine_enabled() and ctx.outside_workspace(p)
         if not ctx.approve(f"Write {p}", _file_preview(content, path=p),
                            key="files", force=outside):
@@ -115,6 +118,39 @@ class WriteFile(Tool):
             return f"ERROR writing {p}: {e}"
         note = _stub_note(p, content)
         return f"OK: wrote {len(content)} chars to {p}{note}"
+
+
+# The "write a script instead of calling the tool" detour, proven live on
+# qwen3:8b: it read a CSV and aggregated it perfectly with the stdlib, then
+# for the ACTUAL deliverable wrote a brand-new pandas/openpyxl generator
+# script (and went on to pip install its imports) instead of calling the
+# create_excel tool it already has. Catch the detour at the moment the
+# generator script is created — before the permission prompt — and teach the
+# native-tool path. Only fires on a NEW .py file whose content bears an
+# Office-file-writing signature, and never when the user's own request asked
+# for a script (then the script IS the deliverable).
+_OFFICE_SCRIPT = re.compile(
+    r"(?im)^\s*(?:import|from)\s+(?:openpyxl|xlsxwriter|docx|pptx)\b"
+    r"|\.to_excel\s*\(|\bExcelWriter\s*\(")
+_WANTS_SCRIPT = re.compile(r"(?i)\bscripts?\b|\.py\b|\bpython (?:file|program|code)\b")
+
+
+def _office_script_guard(path, content, ctx):
+    if not str(path).lower().endswith(".py") or path.exists():
+        return None          # editing/rewriting an existing script is maintenance
+    if _WANTS_SCRIPT.search(ctx.user_msg or ""):
+        return None
+    if not _OFFICE_SCRIPT.search(content):
+        return None
+    return ("ERROR: this script's only job is to generate an Office file — "
+            "that is exactly what GT's native create_excel / create_word / "
+            "create_powerpoint tools do, directly, with no script and no "
+            "extra libraries. Do NOT write a generator script: if values "
+            "still need computing, use the stdlib (csv, json, "
+            "collections.defaultdict/Counter), then call the create_* tool "
+            "with the results as plain lists/dicts (e.g. create_excel with "
+            "sheets=[{name, headers, rows}]). Write a generator script only "
+            "when the user explicitly asked for a script.")
 
 
 # A file that is only a skeleton reads as success to a small model — observed
@@ -389,6 +425,27 @@ class RunCommand(Tool):
         guard = self._self_venv_guard(command, workdir)
         if guard:
             return guard
+        guard = self._flail_guard(command)
+        if guard:
+            return guard
+
+        # Install-cascade breaker (proven live: one broken environment chased
+        # as pip → pip3 → -m pip → brew for 300+ seconds — every command line
+        # DIFFERENT, so the identical-call rail never fired): once a pip
+        # install of a package has failed this turn, every further attempt to
+        # install that same package is refused, whatever the spelling.
+        pkgs = self._pip_pkgs(command)
+        already = pkgs & ctx.state.get("pip_failed", set())
+        if already:
+            pkg = sorted(already)[0]
+            return (f"ERROR: a pip install of '{pkg}' already failed this "
+                    f"turn. Retrying with a different pip spelling (pip / "
+                    f"pip3 / -m pip) or from a different folder hits the "
+                    f"SAME broken environment, not a different installer — "
+                    f"it will fail the same way. Stop chasing the install: "
+                    f"solve the task with the stdlib and GT's own tools, or "
+                    f"report the missing dependency to the user as the "
+                    f"blocker.")
 
         from .permissions import command_keys
         detail = command if workdir == ctx.cwd else f"(in {workdir})  {command}"
@@ -400,7 +457,10 @@ class RunCommand(Tool):
 
         if str(args.get("background", "")).lower() in ("true", "1", "yes"):
             return self._run_background(command, workdir, ctx)
-        return self._run_foreground(command, workdir, ctx, args)
+        result = self._run_foreground(command, workdir, ctx, args)
+        if pkgs and re.match(r"exit code: (?!0\b)", result):
+            ctx.state.setdefault("pip_failed", set()).update(pkgs)
+        return result
 
     _CD = re.compile(r"^cd\s+(\"[^\"]+\"|'[^']+'|[^&;|]+?)\s*(?:&&|;)\s*(.+)$",
                      re.S)
@@ -442,6 +502,70 @@ class RunCommand(Tool):
                             "folder instead: create the venv in a subdirectory "
                             "or under a different name.")
                 break                       # only the first non-flag token is the target
+        return None
+
+    # Packages GT's own document tools never need — a CSV/JSON small enough
+    # for a person to hand over is fully handled by the stdlib (csv, json,
+    # collections). Installing one of these is the exact rabbit hole proven
+    # live TWICE: an unrelated system Python's pip failing, then chasing it
+    # through brew reinstalls for minutes with nothing ever built. The data
+    # playbook already says not to; this makes it a hard refusal, not advice.
+    _DATA_LIBS = re.compile(
+        r"\b(pandas|numpy|scipy|matplotlib|scikit-learn|sklearn)\b", re.I)
+    _PIP_INSTALL = re.compile(r"\bpip3?\s+install\b|-m\s+pip\s+install\b", re.I)
+
+    # A `python -c "..."` one-liner with a compound statement (with/for/if/
+    # while/def/class/try) chained after a semicolon cannot parse — Python's
+    # grammar does not allow a compound statement as a simple_stmt. Proven
+    # live twice: `import csv; with open(...) as f: for row in ...` fails
+    # before any real work happens, then gets retried in slight variants.
+    _DASH_C = re.compile(r"(?:^|[\s&|;])python3?\s+-c\s+", re.I)
+    _COMPOUND_AFTER_SEMI = re.compile(r";\s*(with|for|if|while|def|class|try)\b")
+
+    @classmethod
+    def _pip_pkgs(cls, command):
+        """Package names named by any pip-install segment of a command line
+        (empty set if it isn't one). 'pip' itself is ignored — upgrading pip
+        is plumbing, not a dependency chase."""
+        pkgs = set()
+        for seg in re.split(r"[&|;]+", command):
+            m = cls._PIP_INSTALL.search(seg)
+            if m:
+                pkgs |= {t.strip("\"'").lower() for t in seg[m.end():].split()
+                         if t and not t.startswith("-")}
+        pkgs.discard("pip")
+        return pkgs
+
+    @classmethod
+    def _flail_guard(cls, command):
+        """Refuse the two run_command patterns proven live to burn an entire
+        turn's step budget without producing anything: installing a
+        data-science library GT's tools never need, and a `python -c`
+        one-liner that cannot parse. Each refusal teaches the working
+        alternative instead of just denying, so the model recovers instead
+        of retrying a cosmetic variant of the same dead end."""
+        if cls._PIP_INSTALL.search(command):
+            m = cls._DATA_LIBS.search(command)
+            if m:
+                pkg = m.group(1)
+                return (f"ERROR: GT's tools do not need '{pkg}'. A CSV/JSON "
+                        f"of any size a person would hand you fits in memory "
+                        f"as plain Python: read it with the stdlib csv "
+                        f"module, aggregate with collections.defaultdict or "
+                        f"Counter, and pass the result straight to "
+                        f"create_excel / create_word / create_powerpoint — "
+                        f"they take plain lists/dicts, not a DataFrame. "
+                        f"Do NOT install {pkg}; write a short .py script "
+                        f"instead (write_file it, then run_command it).")
+        if cls._DASH_C.search(command) and cls._COMPOUND_AFTER_SEMI.search(command):
+            return ("ERROR: a `python -c` one-liner cannot contain a "
+                    "compound statement (with/for/if/while/def/class/try) "
+                    "after a semicolon — that is a guaranteed SyntaxError, "
+                    "not a shell-quoting issue, and retrying a reworded "
+                    "variant will fail the same way. Write a real script "
+                    "instead: write_file a short .py file with normal "
+                    "indentation, then run_command it (e.g. "
+                    "\"<python>\" script.py).")
         return None
 
     @classmethod

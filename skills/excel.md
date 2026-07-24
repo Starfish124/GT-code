@@ -8,15 +8,17 @@ priority: 5
 ## Rules — obey before anything else
 - If the user names a file, call read_file on it BEFORE create_excel. Never
   write a number you did not read. Inventing rows is the worst failure here.
-- Every figure must trace to a cell you actually read. Organise what the
-  source says; never add figures it does not contain. Never estimate.
+- Every figure must trace to text you actually read or printed. Never
+  estimate.
 - create_excel is the ONLY way to write .xlsx. Never pip install, never
-  import pandas or openpyxl yourself, never run python3 -c. Aggregate by
-  grouping the rows read_file returned, in your own reasoning.
+  import pandas or openpyxl yourself, never run python3 -c.
+- NEVER do the maths in your head (totals WILL come out wrong): write_file
+  a stdlib .py (csv + collections) that PRINTS each aggregate, run_command
+  it, then pass exactly the printed numbers to create_excel.
 - create_excel CAN add a simple chart: put "chart" on the sheet, e.g.
   {"type":"bar","title":"...","categories":"Department","values":"Amount (EUR)"}
-  — categories/values name header columns. Pivots, formulas and number formats
-  stay unsupported; pre-aggregate rows yourself, never reach for a library.
+  — categories/values name header columns. Pivots, formulas and number
+  formats stay unsupported.
 - If a read shows "[truncated at 20000 chars]" the file is bigger than what
   you saw. Build only from rows you got and say so. Never infer the rest.
 

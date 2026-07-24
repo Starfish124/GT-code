@@ -205,6 +205,27 @@ def attach_content_block(call, reply):
 # The one arg per tool that identifies WHAT it acted on, for the turn digest.
 _DIGEST_ARGS = ("command", "path", "question", "query", "url", "task", "id")
 
+# Tools whose identical call can legitimately repeat within one turn even
+# with the workspace unchanged: check_process polls a background process
+# whose log grows on its own.
+_REPEATABLE = {"check_process"}
+
+# File-producing tools where the SAME call succeeding twice is already
+# suspicious: a third identical write of identical content is never progress,
+# even if other calls changed the workspace in between (the epoch rule alone
+# would keep re-allowing an A-B-A-B rewrite ping-pong forever).
+_WRITE_TOOLS = {"write_file", "edit_file",
+                "create_excel", "create_word", "create_powerpoint"}
+
+# Circuit breaker for no-progress cascades (proven live: a broken pip install
+# chased through brew reinstalls for 300+ seconds — every call DIFFERENT, so
+# the identical-call rails never fired). After _NOPROG_NUDGE consecutive
+# calls that all failed or repeated finished work, the model gets one hard
+# stop-and-rethink nudge; at _NOPROG_STOP the turn ends with an honest
+# stop message instead of burning the rest of max_steps.
+_NOPROG_NUDGE = 4
+_NOPROG_STOP = 7
+
 
 def digest_line(name, args, result):
     """One line remembering a tool step: what ran and how it went.
@@ -271,8 +292,72 @@ def _token_re(name):
     return re.compile(r"(?<![\w.\-])" + re.escape(name) + r"(?![\w\-])")
 
 
+def _empty_deliverable(name, args):
+    """A short reason string if a document tool call carries essentially NO
+    content, else None. Caught live: a model read a real CSV (passing the
+    grounding check below), then called create_excel with real headers but
+    ZERO data rows — no invented numbers, just none, while its final answer
+    confidently described a complete file. Quieter than fabrication, just as
+    unusable as a client deliverable. Only meaningful once a named source
+    exists (a from-scratch/template ask with no source is allowed to be
+    sparse — see the caller, which only invokes this after grounding
+    succeeds), so this never blocks a legitimate blank template."""
+    if name == "create_excel":
+        sheets = args.get("sheets") or []
+        if isinstance(sheets, dict):
+            sheets = [sheets]
+        if not sheets:
+            return None          # ERROR path in the tool itself, not ours to catch
+        total_rows = sum(
+            len(s.get("rows") or []) if isinstance(s, dict) else len(s or [])
+            for s in sheets)
+        if total_rows == 0:
+            return f"zero data rows across {len(sheets)} sheet(s)"
+    elif name == "create_powerpoint":
+        slides = args.get("slides") or []
+        if isinstance(slides, dict):
+            slides = [slides]
+        if not slides:
+            return None
+        total_bullets = sum(
+            len(s.get("bullets") or []) if isinstance(s, dict) else 0
+            for s in slides)
+        has_notes = any(isinstance(s, dict) and s.get("notes") for s in slides)
+        if not total_bullets and not has_notes:
+            return f"zero bullet/notes content across {len(slides)} slide(s)"
+    elif name == "create_word":
+        blocks = args.get("blocks") or []
+        if isinstance(blocks, (str, dict)):
+            blocks = [blocks]
+        if not blocks:
+            return None
+        total_chars = 0
+        for b in blocks:
+            if isinstance(b, str):
+                total_chars += len(b)
+            elif isinstance(b, dict):
+                total_chars += len(str(b.get("text") or ""))
+                total_chars += sum(len(str(x)) for x in (b.get("items") or []))
+        if total_chars == 0:
+            return f"zero text content across {len(blocks)} block(s)"
+    return None
+
+
 # What to feed back for each kind of stall, instead of ending the turn.
 _NUDGE = {
+    "cascade": ("[system] The last several tool calls ALL failed or repeated "
+                "finished work — this approach is going in circles (each "
+                "attempt is a variant of the same dead end, not a new idea). "
+                "STOP the current approach entirely. Either take a genuinely "
+                "different route to the goal, or give your final answer NOW, "
+                "reporting honestly what failed and what you could not do — "
+                "never narrate success that did not happen."),
+    "empty": ("[system] Your last reply was empty — no tool call, nothing "
+              "for the user to see. If you already computed what you need "
+              "(e.g. a script printed real numbers earlier this turn), USE "
+              "that output now: make the tool call with it. If genuinely "
+              "done, say so in one short sentence — never end a turn with "
+              "nothing at all."),
     "badjson": ("[system] That looked like a tool call but it was NOT valid "
                 "JSON — usually an unterminated string or missing closing "
                 "braces on a long file. Re-send it as ONE complete ```json "
@@ -577,8 +662,12 @@ class Agent:
         interrupted = False
         nudged = set()             # stall kinds already nudged this turn
         todo_reminded = bool(self.todos)  # already has a plan → no reminder
-        failed_calls = {}          # (tool, args) of calls that FAILED this turn
+        failed_calls = {}          # (tool, args) -> (error, mutations at failure)
+        done_calls = {}            # (tool, args) -> (result, mutations, successes)
         tool_errors = {}           # tool -> count of ERROR/DENIED results
+        mutations = 0              # successful workspace-changing calls this turn
+        no_progress = 0            # consecutive calls that moved nothing forward
+        mimicry_nudges = 0         # fake-digest replies caught this turn
 
         def _collapse(text):
             """Decide what a finished reply prints as (see ui.py): a real
@@ -649,6 +738,21 @@ class Agent:
                     stall = self._stall_reason(reply.strip(), trace)
                     if (stall and step < self.max_steps
                             and (stall == "mimicry" or stall not in nudged)):
+                        # Mimicry is re-nudged every time (a faked digest can
+                        # never be the answer) — but capped: a model still
+                        # faking after 3 nudges is locked in the pattern, and
+                        # each further round costs a full inference. Stop
+                        # honestly instead of grinding to max_steps.
+                        if stall == "mimicry":
+                            mimicry_nudges += 1
+                            if mimicry_nudges > 3:
+                                self.console.print(
+                                    "[yellow]GT kept faking its bookkeeping "
+                                    "block instead of giving a real answer — "
+                                    "stopping this turn. The work done so "
+                                    "far is kept; rephrase or say 'continue' "
+                                    "to try again.[/yellow]")
+                                break
                         nudged.add(stall)
                         self.console.print(f"[dim]· GT stalled ({stall}) — "
                                            f"nudging it to act[/dim]")
@@ -661,21 +765,53 @@ class Agent:
                     break
 
                 for call in calls:
-                    # Loop breaker (observed live: the same failing
-                    # create_powerpoint call retried 4x while the model
-                    # narrated fake successes): an IDENTICAL call that
-                    # already failed this turn is refused, not re-run.
+                    # Loop breakers. Both are keyed on the exact (tool, args)
+                    # pair and both expire as soon as the workspace changes
+                    # (`mutations` advances), because a repeat is only
+                    # senseless while the world is unchanged:
+                    #  - failed side (observed live: the same failing
+                    #    create_powerpoint call retried 4x while the model
+                    #    narrated fake successes) — but after the model FIXES
+                    #    something, re-running the same command line is a
+                    #    legitimate retry, not a dumb repeat (observed live:
+                    #    `python generate_excel_report.py` wrongly refused
+                    #    after the script itself had been rewritten);
+                    #  - success side (observed live: the SAME README written
+                    #    4x in a row, each burning a permission prompt —
+                    #    failed_calls never fired because every write
+                    #    SUCCEEDED). Skipped without running and without
+                    #    prompting the user.
                     key = (call["tool"],
                            json.dumps(call.get("args") or {},
                                       sort_keys=True, default=str))
-                    if key in failed_calls:
+                    tool_obj = self.tools.get(call["tool"])
+                    failed = failed_calls.get(key)
+                    if failed and failed[1] != mutations:
+                        failed_calls.pop(key)   # workspace changed — retry ok
+                        failed = None
+                    done = done_calls.get(key)
+                    dup_done = bool(done) and call["tool"] not in _REPEATABLE \
+                        and (done[1] == mutations
+                             or (call["tool"] in _WRITE_TOOLS
+                                 and done[2] >= 2))
+                    if failed:
                         observation = (
                             f"REFUSED: you already made exactly this "
                             f"{call['tool']} call and it failed: "
-                            f"{failed_calls[key]}\nRepeating it cannot "
+                            f"{failed[0]}\nRepeating it cannot "
                             f"succeed. Fix the cause first, take a genuinely "
                             f"different approach, or report the blocker to "
                             f"the user as your final answer.")
+                        self._show_step(call["tool"], call.get("args") or {},
+                                        observation)
+                    elif dup_done:
+                        observation = (
+                            f"SKIPPED: you already made exactly this "
+                            f"{call['tool']} call this turn and it succeeded: "
+                            f"{done[0]}\nNothing has changed since, so the "
+                            f"result would be identical — repeating it only "
+                            f"re-does finished work. Move on to the next "
+                            f"step, or give your final answer.")
                         self._show_step(call["tool"], call.get("args") or {},
                                         observation)
                     elif tool_errors.get(call["tool"], 0) >= 3:
@@ -698,11 +834,33 @@ class Agent:
                                       observation.splitlines() if l.strip()),
                                      "")
                         if first.startswith(("ERROR", "DENIED")):
-                            failed_calls[key] = first[:150]
+                            failed_calls[key] = (first[:150], mutations)
                             tool_errors[call["tool"]] = (
                                 tool_errors.get(call["tool"], 0) + 1)
                         elif re.match(r"exit code: (?!0\b)", first):
-                            failed_calls[key] = first[:150]
+                            failed_calls[key] = (first[:150], mutations)
+                        elif not first.startswith("BLOCKED"):
+                            # A real success. If it changed the workspace,
+                            # advance the epoch that expires both breakers.
+                            # (BLOCKED — the anti-fabrication interlock — is
+                            # neither a failure nor a success: the identical
+                            # call must stay retryable after a read, and
+                            # nothing was actually produced.)
+                            if tool_obj is not None and tool_obj.changes_system:
+                                mutations += 1
+                            done_calls[key] = (first[:150], mutations,
+                                               (done[2] + 1) if done else 1)
+                    # Progress accounting for the cascade breaker: a call that
+                    # failed, was refused/skipped, or was BLOCKED moved
+                    # nothing forward; any real success resets the streak.
+                    ofirst = next((l.strip() for l in observation.splitlines()
+                                   if l.strip()), "")
+                    if (ofirst.startswith(("ERROR", "DENIED", "REFUSED",
+                                           "SKIPPED", "BLOCKED"))
+                            or re.match(r"exit code: (?!0\b)", ofirst)):
+                        no_progress += 1
+                    else:
+                        no_progress = 0
                     trace.append(digest_line(call["tool"],
                                              call.get("args") or {},
                                              observation))
@@ -723,6 +881,27 @@ class Agent:
                             "content": (f"[tool result: {call['tool']}]"
                                         f"\n{observation}"),
                         })
+
+                # Cascade breaker: a run of consecutive no-progress calls —
+                # every one a DIFFERENT dead end, so the identical-call rails
+                # above never fire (proven live: pip → broken pyexpat → brew
+                # reinstalls, 300+s, nothing built). One hard rethink nudge,
+                # then an honest stop instead of burning the rest of the
+                # step budget.
+                if no_progress >= _NOPROG_STOP:
+                    self.console.print(
+                        f"[yellow]GT stopped this turn: {no_progress} tool "
+                        f"calls in a row made no progress (failures or "
+                        f"repeats of finished work). The step trace is kept "
+                        f"— fix what it reports or steer differently, then "
+                        f"say 'continue'.[/yellow]")
+                    break
+                if no_progress >= _NOPROG_NUDGE and "cascade" not in nudged:
+                    nudged.add("cascade")
+                    self.console.print("[dim]· GT is going in circles — "
+                                       "nudging it to stop and rethink[/dim]")
+                    messages.append({"role": "user",
+                                     "content": _NUDGE["cascade"]})
 
                 # Claude-Code-style system-reminder: a multi-step task with no
                 # checklist is how the model loses the plan (it made a PowerPoint
@@ -749,6 +928,18 @@ class Agent:
             interrupted = True
             self.console.print("\n[yellow](interrupted — keeping the work "
                                "done so far in this turn)[/yellow]")
+
+        # A second empty reply after the 'empty' nudge used to be accepted as
+        # the final answer — i.e. the turn still ended in SILENCE, the exact
+        # failure the empty-stall detector was built for. Never end silently:
+        # name what happened and the likely cause.
+        if final_answer is not None and not final_answer.strip():
+            self.console.print(
+                "[yellow]GT returned an empty reply twice — the model is "
+                "likely out of context headroom. The steps taken are kept; "
+                "run /compact to shrink the conversation, then say "
+                "'continue'.[/yellow]")
+            final_answer = None
 
         # A work turn that actually ran tools marks the task LIVE and sets
         # the sticky task role: follow-ups run on this same (already warm)
@@ -1130,9 +1321,19 @@ class Agent:
     def _stall_reason(self, text, trace):
         """Classify a no-tool-call reply that shouldn't end the turn.
 
-        Returns 'badjson' | 'failed' | 'intent' | 'echo' | 'mimicry' |
-        'codedump' | None. None means the reply is a legitimate final answer.
+        Returns 'empty' | 'badjson' | 'failed' | 'intent' | 'echo' |
+        'mimicry' | 'codedump' | None. None means the reply is a legitimate
+        final answer.
         """
+        # An EMPTY (or near-empty) reply is never a legitimate answer — it is
+        # not "the model is done," it is generation coming back with nothing
+        # (observed live: prompt had grown to 7836/8192 tokens, leaving almost
+        # no room to think or respond, and the turn silently ended with real
+        # computed data sitting in a script's stdout that never reached
+        # create_excel). Checked before EVERYTHING else, including the
+        # plan-turn bypass — a plan's job is prose, and empty is not prose.
+        if len(text.strip()) < 2:
+            return "empty"
         # Digest mimicry (observed live on the 3B): with a digest in history,
         # the model EMITS a fake '[actions taken this turn]' / '[tool result:'
         # block as its answer instead of acting — anywhere in the reply (live
@@ -1287,8 +1488,15 @@ class Agent:
         OLDEST tool observations (the most recent `keep_recent` stay intact);
         the current step rarely needs the full output of step 3. Returns True
         if anything was compacted.
+
+        The reserved margin is 2048, not a tighter number, because this is
+        only a chars/4 ESTIMATE — real BPE tokenization runs hotter than that
+        on code/data-heavy content (observed live: Ollama's own reported
+        prompt_tokens hit 7836/8192 while this estimate still read comfortably
+        under budget, leaving so little generation headroom the next reply
+        came back empty and silently ended the turn).
         """
-        budget = int(self.config.performance.get("num_ctx", 8192)) - 1024
+        budget = int(self.config.performance.get("num_ctx", 8192)) - 2048
         def over():
             return sum(len(m.get("content") or "") for m in messages) // 4 > budget
         if not over():
@@ -1438,25 +1646,105 @@ class Agent:
         grounded = ctx.state.get("grounded", set())
         partial = ctx.state.get("grounded_partial", set())
         missing = [f for f in named if f not in grounded]
-        if not missing:
-            return None
-        files = ", ".join(sorted(Path(f).name for f in missing))
-        if all(f in partial for f in missing):
-            return (f"BLOCKED: your only read of {files} was truncated at 20000 "
-                    f"chars, so a summary now would present PART of the file as "
-                    f"the whole — a materially wrong client deliverable. Compute "
-                    f"the aggregates over the FULL file: write_file a short .py "
-                    f"using the stdlib csv module, run it with run_command, then "
-                    f"pass the printed rows to {name}. Do not build from the "
-                    f"truncated view.")
-        return (f"BLOCKED: your request names {files} but you have NOT read it "
-                f"this turn — building this now would invent its numbers, "
-                f"columns and categories (the exact failure this rail stops). "
-                f"First call read_file on {files} (or run a script that prints "
-                f"its real rows), THEN make this same {name} call again — once "
-                f"the file is read, the identical call is allowed straight "
-                f"through. This is not a repeat-failure; it is the one required "
-                f"step before it.")
+        if missing:
+            files = ", ".join(sorted(Path(f).name for f in missing))
+            if all(f in partial for f in missing):
+                return (f"BLOCKED: your only read of {files} was truncated at "
+                        f"20000 chars, so a summary now would present PART of "
+                        f"the file as the whole — a materially wrong client "
+                        f"deliverable. Compute the aggregates over the FULL "
+                        f"file: write_file a short .py using the stdlib csv "
+                        f"module, run it with run_command, then pass the "
+                        f"printed rows to {name}. Do not build from the "
+                        f"truncated view.")
+            return (f"BLOCKED: your request names {files} but you have NOT "
+                    f"read it this turn — building this now would invent its "
+                    f"numbers, columns and categories (the exact failure this "
+                    f"rail stops). First call read_file on {files} (or run a "
+                    f"script that prints its real rows), THEN make this same "
+                    f"{name} call again — once the file is read, the identical "
+                    f"call is allowed straight through. This is not a "
+                    f"repeat-failure; it is the one required step before it.")
+        # Grounded — the source WAS genuinely read this turn. But reading a
+        # file and then shipping a deliverable with nothing actually in it is
+        # a quieter cousin of fabrication (proven live: real column names,
+        # real read_file call, then create_excel with zero data rows and a
+        # final answer describing a complete file). Catch that too.
+        empty = _empty_deliverable(name, args)
+        if empty:
+            files = ", ".join(sorted(Path(f).name for f in named))
+            return (f"BLOCKED: you read {files} this turn, but this {name} "
+                    f"call has {empty} — an empty client deliverable, not a "
+                    f"summary of it. You must have computed real aggregate "
+                    f"values from {files} to answer this request; pass THOSE "
+                    f"values into this call. If you have not actually computed "
+                    f"them yet (e.g. via a script's printed output), do that "
+                    f"first, then make this same {name} call again with the "
+                    f"real content filled in.")
+        # Grounded and non-empty — but were the NUMBERS computed or imagined?
+        # Proven live (qwen3:8b, real read, real departments, real currency):
+        # 1200.50+99.50 shipped as 1299 and 450.25+49.75 as 499 — mental
+        # arithmetic dropped the decimal carries. A subtly-wrong total is
+        # WORSE than loud fabrication: nobody catches it. Every numeric cell
+        # must trace to machine-produced text (a read, a script's printed
+        # output) or the user's own message.
+        if name == "create_excel":
+            bad = self._unsourced_numbers(args, ctx)
+            if bad:
+                files = ", ".join(sorted(Path(f).name for f in named))
+                return (f"BLOCKED: these numbers appear nowhere in anything "
+                        f"read or printed this turn: {', '.join(bad[:6])}. "
+                        f"That means they came from arithmetic done in your "
+                        f"head — which is how a deliverable ships wrong "
+                        f"totals (live: 1200.50+99.50 became 1299). Compute "
+                        f"mechanically instead: write_file a short stdlib "
+                        f".py (csv + collections) that reads {files} and "
+                        f"PRINTS every aggregate you need (group totals, "
+                        f"grand totals), run_command it, then make this same "
+                        f"{name} call again using exactly the printed "
+                        f"numbers.")
+        return None
+
+    _NUM_RE = re.compile(r"-?\d[\d,]*(?:\.\d+)?")
+
+    def _unsourced_numbers(self, args, ctx):
+        """Numeric cell values in a create_excel call that appear NOWHERE in
+        this turn's machine-produced text (file reads, command stdout — the
+        'corpus' _record_provenance keeps) nor in the user's own message:
+        numbers that can only have come from the model's mental arithmetic.
+        Small integers (|n| <= 12 — ordinals, counts) are exempt."""
+        corpus = "\n".join(ctx.state.get("corpus", []) + [ctx.user_msg or ""])
+        have = set()
+        for tok in self._NUM_RE.findall(corpus):
+            try:
+                have.add(round(float(tok.replace(",", "")), 6))
+            except ValueError:
+                pass
+        bad = []
+        for sheet in (args.get("sheets") or []):
+            if not isinstance(sheet, dict):
+                continue
+            for row in (sheet.get("rows") or []):
+                if not isinstance(row, (list, tuple)):
+                    continue
+                for cell in row:
+                    if isinstance(cell, bool):
+                        continue
+                    val = cell
+                    if isinstance(cell, str):
+                        try:
+                            val = float(cell.strip().replace(",", ""))
+                        except ValueError:
+                            continue
+                    if not isinstance(val, (int, float)):
+                        continue
+                    if abs(val) <= 12 and float(val).is_integer():
+                        continue
+                    if round(float(val), 6) not in have:
+                        s = str(cell)
+                        if s not in bad:
+                            bad.append(s)
+        return bad
 
     def _record_provenance(self, name, args, result, ctx):
         """Ledger — in ctx.state, per-turn — of which named sources were
@@ -1474,6 +1762,10 @@ class Agent:
             if p.suffix.lower() in _BINARY_SOURCE:
                 return               # zip-byte mojibake grounds nothing
             rp = str(p)
+            # Corpus for the numeric-provenance check: text the machine
+            # actually produced this turn. A truncated read still contributes
+            # real numbers.
+            ctx.state.setdefault("corpus", []).append(result or "")
             if "[truncated at 20000 chars]" in result:
                 ctx.state.setdefault("grounded_partial", set()).add(rp)
             else:
@@ -1492,6 +1784,7 @@ class Agent:
             # references), never 'any exit-0 command' as blanket proof.
             if not first.startswith("exit code: 0") or "stdout:" not in result:
                 return
+            ctx.state.setdefault("corpus", []).append(result or "")
             command = str(args.get("command", ""))
             grounded = ctx.state.setdefault("grounded", set())
             scripts = ctx.state.get("scripts", {})
